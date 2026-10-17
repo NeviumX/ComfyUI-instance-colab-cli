@@ -4,6 +4,7 @@ ComfyUI の画面に「停止」ボタンを足し、押されたことを手元
 ランタイムの削除は手元の colab CLI にしかできないので、このノードは要求を記録するだけで、
 start.bat のウィンドウがトンネル越しに GET /colab_cli/stop を数秒ごとに確かめて実行する。
 ボタンのダイアログからは、ComfyUI の出力をまとめて ZIP でダウンロードすることもできる。
+「モデル」ボタンからは、Hugging Face と Civitai のモデルをランタイムか Google ドライブにダウンロードできる。
 """
 
 import asyncio
@@ -11,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import sys
 import time
 import zipfile
 
@@ -87,6 +89,93 @@ async def colab_cli_stop_reset(request):
         return _answer({"error": "expected application/json"}, 415)
     STATE.update(state="idle", delete_runtime=False)
     return _answer(STATE)
+
+
+# ---- モデルのダウンロード ----
+# ダウンロードは、手元から送った model_download.py を別のプロセスで動かす。ComfyUI を止めずに中止できるようにするため
+
+STAGE = Path(os.environ.get("COMFY_COLAB_CLI_STAGE", "/content/.comfy-colab-cli"))
+DOWNLOADER = STAGE / "model_download.py"
+DOWNLOAD_PROGRESS = STAGE / "state/download-progress.json"
+DOWNLOAD_JOB = {"process": None}
+
+
+def _downloader_args(command):
+    args = [sys.executable, str(DOWNLOADER), command, "--models", os.environ.get("COMFY_COLAB_CLI_MODELS", "")]
+    drive_models = os.environ.get("COMFY_COLAB_CLI_DRIVE_MODELS", "")
+    if drive_models:
+        args += ["--drive-models", drive_models]
+    return args
+
+
+async def _json_body(request):
+    if request.content_type != "application/json":
+        return None, _answer({"error": "expected application/json"}, 415)
+    try:
+        body = await request.json()
+    except ValueError:
+        return None, _answer({"error": "invalid json"}, 400)
+    if not isinstance(body, dict):
+        return None, _answer({"error": "invalid request"}, 400)
+    return body, None
+
+
+@routes.get("/colab_cli/models/folders")
+async def colab_cli_model_folders(request):
+    if not DOWNLOADER.exists():
+        return _answer({"error": "downloader missing"}, 503)
+    process = await asyncio.create_subprocess_exec(*_downloader_args("folders"), stdout=asyncio.subprocess.PIPE)
+    out, _ = await process.communicate()
+    try:
+        return _answer(json.loads(out))
+    except ValueError:
+        return _answer({"error": "could not list folders"}, 500)
+
+
+@routes.post("/colab_cli/models/download")
+async def colab_cli_model_download(request):
+    body, refused = await _json_body(request)
+    if refused:
+        return refused
+    process = DOWNLOAD_JOB["process"]
+    if process is not None and process.returncode is None:
+        return _answer({"error": "busy"}, 409)
+    DOWNLOAD_PROGRESS.parent.mkdir(parents=True, exist_ok=True)
+    DOWNLOAD_PROGRESS.unlink(missing_ok=True)
+    args = _downloader_args("download") + [
+        "--state", str(STAGE / "state"), "--tokens-file", str(STAGE / "state/tokens.json"),
+        "--progress-file", str(DOWNLOAD_PROGRESS),
+        "--url", str(body.get("url", "")), "--folder", str(body.get("folder", "")),
+        "--filename", str(body.get("filename", "")), "--sha256", str(body.get("sha256", ""))]
+    if body.get("to_drive") is True:
+        args.append("--to-drive")
+    DOWNLOAD_JOB["process"] = await asyncio.create_subprocess_exec(
+        *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    return _answer({"state": "running"})
+
+
+@routes.get("/colab_cli/models/download")
+async def colab_cli_model_download_state(request):
+    process = DOWNLOAD_JOB["process"]
+    try:
+        progress = json.loads(DOWNLOAD_PROGRESS.read_text())
+    except (OSError, ValueError):
+        progress = {"state": "running" if process is not None and process.returncode is None else "idle"}
+    # 進み具合を書けずに終わったときも、画面が待ち続けないようにする
+    if progress.get("state") == "running" and process is not None and process.returncode is not None:
+        progress["state"] = "failed"
+    return _answer(progress)
+
+
+@routes.post("/colab_cli/models/cancel")
+async def colab_cli_model_cancel(request):
+    _, refused = await _json_body(request)
+    if refused:
+        return refused
+    process = DOWNLOAD_JOB["process"]
+    if process is not None and process.returncode is None:
+        process.terminate()
+    return _answer({"state": "cancelling"})
 
 
 # ---- 出力の ZIP ----

@@ -35,6 +35,9 @@ DRIVE_STORAGE="$DRIVE_MOUNT/MyDrive/$DRIVE_FOLDER/environment"
 STAGE_DIR="${STAGE_DIR:-/content/.comfy-colab-cli}"
 COMFY_DIR="$COMFY_BASE/environment/ComfyUI"
 OUTPUT_REMOTE="$COMFY_BASE/output"
+# モデルのダウンロードに使うトークン。config.local.env に書く
+HF_TOKEN="${HF_TOKEN:-}"
+CIVITAI_TOKEN="${CIVITAI_TOKEN:-}"
 TMUX_SESSION=comfyui
 # shellcheck disable=SC2034  # remote_env で Colab VM に渡す
 SAVE_SESSION=comfyui-save
@@ -161,12 +164,36 @@ remote_start() {
                 STAGE_DIR TMUX_SESSION SAVE_SESSION NODE_NAME) bash -s"
 }
 
-# 停止ボタンのカスタムノードと、環境を保存・復元・更新する comfy_env.py を VM へ送る
+# 停止ボタンのカスタムノード、環境を保存・復元・更新する comfy_env.py、モデルをダウンロードする model_download.py を VM へ送る
 upload_files() {
     tar -C "$ROOT" --exclude=__pycache__ --transform 's#^node/#custom_nodes/#;s#^lib/##' \
-        -cf - "node/$NODE_NAME" lib/comfy_env.py |
+        -cf - "node/$NODE_NAME" lib/comfy_env.py lib/model_download.py |
         rssh "mkdir -p $STAGE_DIR && rm -rf $STAGE_DIR/custom_nodes/$NODE_NAME && tar -C $STAGE_DIR -xf -" ||
         die "$(msg node_upload_failed)"
+    upload_tokens
+}
+
+# モデルのダウンロード用のトークンを JSON にする。値は英数字と記号の一部だけを受け付ける
+tokens_json() {
+    local name value out="" sep=""
+    for name in HF_TOKEN CIVITAI_TOKEN; do
+        value="${!name:-}"
+        [[ -n "$value" ]] || continue
+        if [[ ! "$value" =~ ^[A-Za-z0-9_.:-]+$ ]]; then
+            warn "$(msg token_invalid "$name")"
+            continue
+        fi
+        out+="$sep\"$name\":\"$value\""
+        sep=","
+    done
+    printf '{%s}' "$out"
+}
+
+# トークンを VM の root だけが読めるファイルに置く。ComfyUI の画面からのダウンロードが使う。
+# コマンドの引数には載せず、標準入力で渡す
+upload_tokens() {
+    tokens_json | rssh "umask 077 && mkdir -p $STAGE_DIR/state && cat > $STAGE_DIR/state/tokens.json" ||
+        warn "$(msg token_upload_failed)"
 }
 
 # ComfyUI を指定の版に更新する。ComfyUI と定期保存を止めてから更新し、起動し直すのは呼び出し側

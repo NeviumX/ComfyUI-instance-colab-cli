@@ -421,6 +421,11 @@ cmd="cd $(printf '%q' "$COMFY_DIR") && COMFY_COLAB_CLI_LANG=$(printf '%q' "$MSG_
 saving=0
 [[ "$SAVE_ENVIRONMENT" == 1 && -n "$STORAGE" ]] && saving=1
 cmd+=" COMFY_COLAB_CLI_PULL=$(printf '%q' "$PULL_OUTPUTS_ON_STOP") COMFY_COLAB_CLI_SAVE=$saving PYTHONUNBUFFERED=1"
+# 「モデル」ボタンのダウンロードに使う場所。Drive がマウントされていなければ、ドライブの場所は空にする
+drive_for_download=""
+[[ "$DRIVE_READY" == 1 ]] && drive_for_download="$DRIVE_MODELS"
+cmd+=" COMFY_COLAB_CLI_STAGE=$(printf '%q' "$STAGE_DIR") COMFY_COLAB_CLI_MODELS=$(printf '%q' "$COMFY_BASE/models")"
+cmd+=" COMFY_COLAB_CLI_DRIVE_MODELS=$(printf '%q' "$drive_for_download")"
 cmd+=" $(printf '%q' "$VENV_PY") $(printf '%q ' "${args[@]}") 2>&1 | tee -a $(printf '%q' "$REMOTE_LOG")"
 cmd+="; echo $(printf '%q' "$EXIT_MARK") | tee -a $(printf '%q' "$REMOTE_LOG"); sleep infinity"
 

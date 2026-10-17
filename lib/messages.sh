@@ -131,6 +131,50 @@ _m u_stopping \
     "ComfyUI と定期保存を止めます。" \
     "Stopping ComfyUI and the periodic save."
 
+# ===== model-download.sh =====
+_m md_list_failed \
+    "モデルのフォルダーの一覧を取得できませんでした。" \
+    "Could not get the list of model folders."
+_m md_folders \
+    "保存先のフォルダー:" \
+    "Folders:"
+_m md_pick_folder \
+    "番号を選んでください。Enter だけなら %s: " \
+    "Pick a number. Enter alone picks %s: "
+_m md_bad_number \
+    "一覧の番号を入力してください。" \
+    "Enter a number from the list."
+_m md_url \
+    "Hugging Face のファイルのページか、Civitai のモデルのページの URL: " \
+    "URL of a Hugging Face file page or a Civitai model page: "
+_m md_filename \
+    "ファイル名。空のままなら URL やサイトの名前を使います: " \
+    "File name. Leave empty to use the name from the URL or the site: "
+_m md_where \
+    "保存する場所:\n  1) ランタイムだけ。速く、ランタイムを削除すると消えます\n  2) Google ドライブにも残す。ランタイムに落としてから、ドライブにコピーします" \
+    "Save to:\n  1) The runtime only. Fast, and gone when the runtime is deleted\n  2) Google Drive too. Downloaded to the runtime first, then copied to Drive"
+_m md_where_prompt \
+    "1 か 2 を選んでください。Enter だけなら 2: " \
+    "Pick 1 or 2. Enter alone picks 2: "
+_m md_no_drive \
+    "Google ドライブがマウントされていないので、ランタイムにだけ保存します。" \
+    "Google Drive is not mounted, so the model is saved on the runtime only."
+_m md_starting \
+    "%s にダウンロードします。" \
+    "Downloading into %s."
+_m md_failed \
+    "ダウンロードできませんでした。上の理由を確かめてください。" \
+    "The download failed. See the reason above."
+_m md_done \
+    "終わりました。" \
+    "Done."
+_m token_invalid \
+    "%s に使えない文字が入っているので、送りません。" \
+    "%s contains characters that cannot be used, so it is not sent."
+_m token_upload_failed \
+    "モデルのダウンロード用のトークンを VM に送れませんでした。" \
+    "Could not send the model download tokens to the VM."
+
 # ===== 起動待ちと復旧 =====
 _m why_port_in_use \
     "ポート %s が使用中で ComfyUI が起動できませんでした" \

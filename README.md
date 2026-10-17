@@ -29,6 +29,7 @@ Change the GPU, ports and other settings in `config.env`. Settings of your own c
 | Create a runtime and open ComfyUI | `start.bat` | `./up.sh` |
 | Delete the runtime | `stop.bat` | `./down.sh` |
 | Update ComfyUI | `update.bat` | `./update.sh` |
+| Download a model | `model-download.bat` | `./model-download.sh` |
 | Show status | `status.bat` | `./status.sh` |
 | Reconnect a closed tunnel | `start.bat` | `./tunnel.sh` |
 | Copy the outputs to this PC | | `./pull-outputs.sh` |
@@ -53,6 +54,33 @@ The `start.bat` window carries out the choice, so keep it open while you use Com
 
 **Download the outputs as a ZIP** in the same dialog packs the outputs on Colab into one ZIP file and hands it to your browser as a download.
 With many outputs, it takes a while to arrive.
+
+### Downloading models
+
+While the runtime runs, you can download models from Hugging Face and Civitai to Colab in two ways.
+
+- **In ComfyUI:** press Models at the top right, pick a folder, paste the URL and press Download.
+  A progress bar shows how far it got. The download runs on Colab, so closing the dialog does not stop it.
+- **model-download.bat:** pick a folder by number, paste the URL and choose where to save. A progress bar is shown and the window closes when it is done.
+  If the download fails, the window stays open so you can read why.
+
+For Hugging Face, copy the URL of the file page from your browser. For Civitai, copy the URL of the model page with a version selected.
+
+Choose where to save:
+
+- **The runtime only:** the fastest, and gone when the runtime is deleted.
+- **Google Drive too:** downloaded to the runtime first, then copied to Drive. ComfyUI can use it as soon as it is on the runtime.
+
+When the download is done, press R in ComfyUI to see the model in the lists. A file with the same name is never overwritten.
+
+For models that need authentication, put your tokens in `config.local.env`, then start with `start.bat`.
+
+```bash
+HF_TOKEN=hf_...
+CIVITAI_TOKEN=...
+```
+
+Each token is sent only to its own site.
 
 ### Updating ComfyUI
 
