@@ -167,6 +167,18 @@ async def colab_cli_model_download_state(request):
     return _answer(progress)
 
 
+@routes.post("/colab_cli/models/dismiss")
+async def colab_cli_model_dismiss(request):
+    """ダイアログを閉じたときに呼ぶ。終わったダウンロードの結果を消し、次に開いたときに出さない。"""
+    _, refused = await _json_body(request)
+    if refused:
+        return refused
+    process = DOWNLOAD_JOB["process"]
+    if process is None or process.returncode is not None:
+        DOWNLOAD_PROGRESS.unlink(missing_ok=True)
+    return _answer({"state": "idle"})
+
+
 @routes.post("/colab_cli/models/cancel")
 async def colab_cli_model_cancel(request):
     _, refused = await _json_body(request)

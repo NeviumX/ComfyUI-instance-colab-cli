@@ -155,6 +155,7 @@ function mount(settings) {
   button.title = text.title;
 
   let timer = null;
+  let downloading = false;  // 進んでいる途中なら、閉じても結果を残して続きを見られるようにする
   const setRunning = (running) => {
     for (const input of [folder, url, filename, sha256, toRuntime, toDrive, start]) input.disabled = running;
     if (!running && toDrive.dataset.unavailable) toDrive.disabled = true;
@@ -162,6 +163,7 @@ function mount(settings) {
   };
   const show = (progress) => {
     const running = progress.state === "running";
+    downloading = running;
     setRunning(running);
     if (running) {
       const label = progress.phase === "copy" ? text.copying : text.downloading;
@@ -248,7 +250,15 @@ function mount(settings) {
     }
   });
   close.addEventListener("click", () => dialog.close());
-  dialog.addEventListener("close", () => clearTimeout(timer));
+  dialog.addEventListener("close", () => {
+    clearTimeout(timer);
+    if (downloading) return;
+    // 終わった結果は、閉じたら画面からも Colab 側の記録からも消す。再読み込みしても出さない
+    status.textContent = "";
+    bar.hidden = true;
+    api.fetchApi("/colab_cli/models/dismiss", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })
+      .catch(() => {});
+  });
   // ダイアログの中で押したキーを ComfyUI のショートカットとして扱わせない
   dialog.addEventListener("keydown", (event) => event.stopPropagation());
   button.addEventListener("click", async () => {
