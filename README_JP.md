@@ -65,6 +65,14 @@ GPU やポートなどは `config.env` で変更できます。自分だけの�
 - 更新できなかったときは元の版に戻し、Google ドライブには保存しません。
 - ComfyUI-Manager の「Update ComfyUI」は使わないでください。更新の途中で定期保存が走ると、食い違った環境が保存されることがあります。
 
+### SageAttention と起動オプション
+
+`config.env` の `USE_SAGE_ATTENTION=1` が既定で、起動のときに SageAttention を入れて、その GPU で試します。
+使えれば `--use-sage-attention` を付けて起動し、使えなければ理由を表示して標準の attention で起動します。
+
+ComfyUI の起動オプションは、`config.env` の `COMFY_EXTRA_ARGS` に空白で区切って書きます。例: `COMFY_EXTRA_ARGS='--fast fp16_accumulation'`。
+新しく ComfyUI を起動するときに反映されます。
+
 ### Google ドライブのモデル
 
 `USE_DRIVE=1` のとき、起動時に Google ドライブをマウントし、`マイドライブ/ComfyUI-Colab/models` のモデルを ComfyUI に追加します。

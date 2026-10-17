@@ -11,6 +11,7 @@
 #               DRIVE_READY: 1 なら DRIVE_MODELS のモデルを使い、DRIVE_STORAGE に環境を保存する
 #               SAVE_ENVIRONMENT / RESTORE_ENVIRONMENT / SAVE_INTERVAL_SEC: 環境の保存と復元
 #               AUTO_UPDATE: 1 なら、新しいリリースがあれば起動の前に更新する
+#               USE_SAGE_ATTENTION: 1 なら SageAttention を入れて試し、使えれば --use-sage-attention で起動する
 #               PULL_OUTPUTS_ON_STOP: 停止ボタンの説明を切り替えるために ComfyUI へ渡す
 #               STAGE_DIR / NODE_NAME: 手元から送ったファイルの置き場所と、停止ボタンのノードの名前
 #               TMUX_SESSION / SAVE_SESSION: ComfyUI と定期保存を動かす tmux のセッション名
@@ -330,6 +331,42 @@ for url in "${nodes[@]}"; do
     fi
 done
 
+# ---- SageAttention ----
+# --use-sage-attention を付けたのにパッケージが無いと、ComfyUI は起動時に終了する。カーネルをコンパイルできないと、
+# attention を呼ぶたびにエラーを記録して標準の attention に切り替わる。どちらも避けるため、入れたうえで GPU で試し、
+# 通ったときだけ引数を付ける。1.0.6 は Python だけでできた版で、カーネルは PyTorch に付いてくる Triton が実行時に作る。
+SAGE_ATTENTION_PACKAGE=sageattention==1.0.6
+SAGE_ATTENTION_PROBE='
+import torch
+from sageattention import sageattn
+q, k, v = (torch.randn(1, 2, 256, 64, device="cuda", dtype=torch.float16) for _ in range(3))
+out = sageattn(q, k, v, is_causal=False, tensor_layout="HND", sm_scale=None, smooth_k=False)
+assert out.shape == q.shape and bool(torch.isfinite(out).all()), "SageAttention returned an unusable result"
+'
+sage_args=()
+if [[ "$USE_SAGE_ATTENTION" == 1 ]]; then
+    # 試した結果はこの VM の間だけ覚えておく。GPU もパッケージも変わらないため
+    if [[ ! -f "$STATE/sage-attention" ]]; then
+        if ! "$VENV_PY" -c 'import importlib.util, sys; sys.exit(0 if importlib.util.find_spec("sageattention") else 1)'; then
+            # 保存した環境に入っていれば、その版のまま使う
+            rmsg r_sage_installing "$SAGE_ATTENTION_PACKAGE"
+            uv_install "$SAGE_ATTENTION_PACKAGE" || true
+        fi
+        if probe="$(timeout 600 "$VENV_PY" -c "$SAGE_ATTENTION_PROBE" 2>&1)"; then
+            echo ok > "$STATE/sage-attention"
+        else
+            printf '%s\n' "$probe" | tail -n 15
+            echo failed > "$STATE/sage-attention"
+        fi
+    fi
+    if [[ "$(cat "$STATE/sage-attention")" == ok ]]; then
+        rmsg r_sage_enabled
+        [[ " $COMFY_EXTRA_ARGS " == *" --use-sage-attention "* ]] || sage_args=(--use-sage-attention)
+    else
+        rmsg r_sage_unavailable
+    fi
+fi
+
 if ! "$VENV_PY" -m pip check >/dev/null 2>&1; then
     "$VENV_PY" -m pip check || true
     rmsg r_pip_check_failed
@@ -372,8 +409,8 @@ args=("$COMFY_DIR/main.py" --listen 127.0.0.1 --port "$REMOTE_PORT" "${manager_a
       --base-directory "$COMFY_DIR" --user-directory "$COMFY_DIR/user"
       --input-directory "$COMFY_BASE/input" --output-directory "$COMFY_BASE/output" --temp-directory "$COMFY_BASE/temp"
       --database-url "sqlite:///$COMFY_BASE/database/comfyui.db"
-      --extra-model-paths-config "$EXTRA_PATHS")
-# COMFY_EXTRA_ARGS は空白で区切って渡す
+      --extra-model-paths-config "$EXTRA_PATHS" "${sage_args[@]}")
+# COMFY_EXTRA_ARGS は空白で区切って渡す。--fast のように後ろの語を値として取る引数があるので、最後に置く
 # shellcheck disable=SC2206
 [[ -n "$COMFY_EXTRA_ARGS" ]] && args+=($COMFY_EXTRA_ARGS)
 

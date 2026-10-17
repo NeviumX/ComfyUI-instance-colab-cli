@@ -65,6 +65,14 @@ Every start checks whether a newer release of ComfyUI exists and, if so, says so
 - If the update fails, ComfyUI goes back to the earlier version and nothing is saved to Google Drive.
 - Do not use "Update ComfyUI" in ComfyUI-Manager. A periodic save during that update can store an inconsistent environment.
 
+### SageAttention and launch options
+
+With `USE_SAGE_ATTENTION=1` in `config.env`, the default, SageAttention is installed at startup and tried on the GPU.
+If it works, ComfyUI starts with `--use-sage-attention`. If not, the reason is shown and ComfyUI starts with the standard attention.
+
+Put other ComfyUI launch options in `COMFY_EXTRA_ARGS` in `config.env`, separated by spaces. Example: `COMFY_EXTRA_ARGS='--fast fp16_accumulation'`.
+They take effect the next time ComfyUI starts.
+
 ### Models on Google Drive
 
 With `USE_DRIVE=1`, Google Drive is mounted at startup and the models in `My Drive/ComfyUI-Colab/models` are added to ComfyUI.

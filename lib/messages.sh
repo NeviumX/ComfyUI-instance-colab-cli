@@ -366,6 +366,15 @@ _m r_auto_updating \
 _m r_auto_update_failed \
     "更新できなかったので、今の版のまま起動します。" \
     "The update failed, so ComfyUI starts with the current version."
+_m r_sage_installing \
+    "SageAttention を入れます: %s" \
+    "Installing SageAttention: %s"
+_m r_sage_enabled \
+    "SageAttention を使います。" \
+    "Using SageAttention."
+_m r_sage_unavailable \
+    "この環境では SageAttention を使えなかったので、標準の attention で起動します。理由は上の表示です。" \
+    "SageAttention cannot be used here, so ComfyUI starts with the standard attention. The reason is shown above."
 _m r_lock_timeout \
     "別の準備が 30 分たっても終わりません。./ssh.sh で入り、%s を持っているプロセスを確かめてください。" \
     "Another setup has not finished after 30 minutes. Open a shell with ./ssh.sh and check which process holds %s."
