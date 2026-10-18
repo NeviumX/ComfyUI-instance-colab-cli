@@ -146,7 +146,7 @@ async def colab_cli_model_download(request):
         "--state", str(STAGE / "state"), "--tokens-file", str(STAGE / "state/tokens.json"),
         "--progress-file", str(DOWNLOAD_PROGRESS),
         "--url", str(body.get("url", "")), "--folder", str(body.get("folder", "")),
-        "--filename", str(body.get("filename", "")), "--sha256", str(body.get("sha256", ""))]
+        "--filename", str(body.get("filename", ""))]
     if body.get("to_drive") is True:
         args.append("--to-drive")
     DOWNLOAD_JOB["process"] = await asyncio.create_subprocess_exec(

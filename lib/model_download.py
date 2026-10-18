@@ -4,17 +4,16 @@ ComfyUI の画面からはノードがこのファイルを別のプロセスで
 
     python3 model_download.py folders --models DIR [--drive-models DIR]
     python3 model_download.py download --models DIR [--drive-models DIR] --state DIR
-                                       --url URL --folder NAME [--filename NAME] [--sha256 HEX] [--to-drive]
+                                       --url URL --folder NAME [--filename NAME] [--to-drive]
                                        [--tokens-file FILE | --tokens-stdin] [--progress-file FILE] [--bar]
 
-ランタイムの models に .part として書き、確かめてから正しい名前にする。--to-drive なら、続けて Google ドライブにもコピーする。
+ランタイムの models に .part として書き、書き終えてから正しい名前にする。SHA256 は計算して表示する。--to-drive なら、続けて Google ドライブにもコピーする。
 ランタイムのディスクに先に書くので、ComfyUI ではすぐに使える。ドライブへの書き込みは遅いことがあるため、この順にしている。
 """
 
 import argparse
 import fcntl
 import hashlib
-import hmac
 import ipaddress
 import json
 import os
@@ -37,7 +36,6 @@ TEXTS = {
         "civitai_url": "Civitai は、バージョンを選んだモデルのページの URL か、ダウンロードの URL を指定してください。",
         "bad_folder": "保存先のフォルダー名が正しくありません: {folder}",
         "bad_filename": "ファイル名にはフォルダーを含められません: {name}",
-        "bad_sha256": "SHA256 は 16 進数 64 文字で指定してください。",
         "not_https": "HTTPS ではない転送先には接続しません。",
         "private": "内部のアドレスへの転送には接続しません。",
         "unresolved": "接続先の名前を解決できません: {host}",
@@ -49,7 +47,6 @@ TEXTS = {
         "no_filename": "ファイル名が分かりません。ファイル名を指定してください。",
         "exists": "同じ名前のファイルが既にあります。上書きはしません: {path}",
         "no_space": "ランタイムのディスクの空きが足りません。必要 {need}、空き {free}。",
-        "sha_mismatch": "SHA256 が一致しません。ダウンロードしたファイルは消しました。",
         "busy": "ほかのダウンロードが進んでいます。終わってからもう一度実行してください。",
         "no_drive": "Google ドライブがマウントされていないので、ドライブには保存できません。",
         "connection": "接続できませんでした: {reason}",
@@ -66,7 +63,6 @@ TEXTS = {
         "civitai_url": "For Civitai, give the URL of a model page with a version selected, or a download URL.",
         "bad_folder": "The folder name is not valid: {folder}",
         "bad_filename": "The file name cannot contain a folder: {name}",
-        "bad_sha256": "Give SHA256 as 64 hexadecimal characters.",
         "not_https": "A redirect to a non-HTTPS address is not followed.",
         "private": "A redirect to an internal address is not followed.",
         "unresolved": "Cannot resolve the host name: {host}",
@@ -78,7 +74,6 @@ TEXTS = {
         "no_filename": "The file name is unknown. Give a file name.",
         "exists": "A file with the same name already exists and is not overwritten: {path}",
         "no_space": "Not enough free disk space on the runtime. Needed {need}, free {free}.",
-        "sha_mismatch": "SHA256 does not match. The downloaded file was deleted.",
         "busy": "Another download is in progress. Try again when it is done.",
         "no_drive": "Google Drive is not mounted, so the model cannot be saved there.",
         "connection": "Could not connect: {reason}",
@@ -322,9 +317,6 @@ def download(args, tokens, progress):
     folder = safe_folder(args.folder)
     given = args.filename.strip() or suggested
     name = safe_filename(given) if given else ""
-    sha256 = args.sha256.strip().lower()
-    if sha256 and not re.fullmatch(r"[a-f0-9]{64}", sha256):
-        raise Failure(t("bad_sha256"))
     models = Path(args.models)
     drive_models = Path(args.drive_models) if args.drive_models else None
     if args.to_drive and not (drive_models and drive_models.parent.is_dir()):
@@ -368,8 +360,6 @@ def download(args, tokens, progress):
                     progress.advance(len(chunk))
         if not partial.stat().st_size:
             raise Failure(t("empty"))
-        if sha256 and not hmac.compare_digest(digest.hexdigest(), sha256):
-            raise Failure(t("sha_mismatch"))
         target = local_dir / name
         check_free(name)
         os.replace(partial, target)
@@ -393,7 +383,6 @@ def main():
     parser.add_argument("--url", default="")
     parser.add_argument("--folder", default="")
     parser.add_argument("--filename", default="")
-    parser.add_argument("--sha256", default="")
     parser.add_argument("--to-drive", action="store_true")
     parser.add_argument("--tokens-file", default="")
     parser.add_argument("--tokens-stdin", action="store_true")

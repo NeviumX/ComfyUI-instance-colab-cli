@@ -6,17 +6,17 @@ import { api } from "../../scripts/api.js";
 
 const STOP_PATH = "/colab_cli/stop";
 // 停止ダイアログの右上に置く GitHub のマーク。空ならマークを出さない
-const REPOSITORY_URL = "";
+const REPOSITORY_URL = "https://github.com/NeviumX/ComfyUI-instance-colab-cli";
 
 const TEXTS = {
   ja: {
     stop: "停止",
     title: "ComfyUIを停止",
-    explain: "ランタイムを削除すると、コンピューティングユニットの消費が止まり、Colab 上のファイルはすべて消えます。Google ドライブのモデルは残ります。",
-    saveNote: "削除の前に、カスタムノードや設定などの環境を Google ドライブに保存します。",
+    explain: "ランタイムを削除するとコンピューティングユニットの消費が止まり、Colab上のファイルはすべて消えます。Googleドライブのモデルは残ります。",
+    saveNote: "削除の前に、カスタムノードや設定などの環境をGoogleドライブに保存します。",
     pull: "生成したファイルは、削除の前に手元の outputs フォルダーへコピーされます。",
     noPull: "生成したファイルは手元にコピーされません。必要なものは先に保存してください。",
-    disconnectNote: "接続だけを解除した場合、ランタイムは動き続けて課金も続きます。start.bat で再接続できます。",
+    disconnectNote: "接続だけを解除した場合ランタイムは動き続けて課金も続きます。start.bat で再接続できます。",
     delete: "接続を解除してランタイムを削除",
     disconnect: "接続だけを解除",
     cancel: "キャンセル",
