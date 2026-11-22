@@ -8,7 +8,8 @@
 #
 # 受け取る変数: COMFY_REPO COMFY_REF COMFY_BASE REMOTE_PORT INSTALL_MANAGER CUSTOM_NODES COMFY_EXTRA_ARGS
 #               APT_PACKAGES REMOTE_LOG MSG_LANG
-#               DRIVE_READY: 1 なら DRIVE_MODELS のモデルを使い、DRIVE_STORAGE に環境を保存する
+#               DRIVE_READY: 1 なら DRIVE_MODELS のモデルを使い、DRIVE_STORAGE に環境を保存し、DRIVE_LEDGER を台帳にする
+#               MODEL_SOURCE: ランタイムに写しが無いモデルを、drive と url のどちらから先に取るか
 #               SAVE_ENVIRONMENT / RESTORE_ENVIRONMENT / SAVE_INTERVAL_SEC: 環境の保存と復元
 #               AUTO_UPDATE: 1 なら、新しいリリースがあれば起動の前に更新する
 #               USE_SAGE_ATTENTION: 1 なら SageAttention を入れて試し、使えれば --use-sage-attention で起動する
@@ -66,6 +67,14 @@ source $(printf '%q' "$STAGE_DIR/env.sh")
 exec $(printf '%q' "$PY") $(printf '%q' "$STAGE_DIR/comfy_env.py") save "\$@"
 EOF
 cenv() { (source "$STAGE_DIR/env.sh"; COMFY_STORAGE="$STORAGE" "$PY" "$STAGE_DIR/comfy_env.py" "$@"); }
+
+# モデルの台帳。ドライブがあればドライブに置き、無ければ VM の中に置いて手元と行き来させる。
+# 手元から送った台帳はどちらにも合わせる。ドライブを使わない回にダウンロードしたモデルも、次にドライブを使う回へ引き継ぐため
+if [[ "$DRIVE_READY" == 1 ]]; then LEDGER="$DRIVE_LEDGER"; else LEDGER="$STATE/model-sources.json"; fi
+printf '%s\n' "$LEDGER" > "$STATE/ledger-path"
+"$PY" "$STAGE_DIR/model_sources.py" merge --into "$LEDGER" --from "$STATE/model-sources.local.json" \
+    --lock "$STATE/ledger.lock" || rmsg r_ledger_merge_failed
+[[ "${MODEL_SOURCE:-drive}" == url ]] || MODEL_SOURCE=drive
 # 保存してよいときだけ Drive に書く。SAVE_ENVIRONMENT=0 で復元だけを使う場合に、更新の後で保存しないため
 cenv_saving() { (source "$STAGE_DIR/env.sh"; "$PY" "$STAGE_DIR/comfy_env.py" "$@"); }
 
@@ -385,10 +394,10 @@ EXTRA_PATHS="$STAGE_DIR/extra_model_paths.yaml"
         for d in "$COMFY_BASE"/models/*/; do
             mkdir -p "$DRIVE_MODELS/$(basename "$d")"
         done
-        # is_default にするので、Manager などがダウンロードしたモデルも Drive に保存される
+        # ランタイムの models の後ろに足す。ランタイムに写しがあれば、そちらを先に読む。
+        # Manager などがダウンロードしたモデルはランタイムに入り、停止ボタンのノードがあとからドライブにも写す
         echo "colab_drive:"
         echo "  base_path: \"$DRIVE_MODELS\""
-        echo "  is_default: true"
         for d in "$DRIVE_MODELS"/*/; do
             [[ -d "$d" ]] || continue
             n="$(basename "$d")"
@@ -426,6 +435,8 @@ drive_for_download=""
 [[ "$DRIVE_READY" == 1 ]] && drive_for_download="$DRIVE_MODELS"
 cmd+=" COMFY_COLAB_CLI_STAGE=$(printf '%q' "$STAGE_DIR") COMFY_COLAB_CLI_MODELS=$(printf '%q' "$COMFY_BASE/models")"
 cmd+=" COMFY_COLAB_CLI_DRIVE_MODELS=$(printf '%q' "$drive_for_download")"
+cmd+=" COMFY_COLAB_CLI_LEDGER=$(printf '%q' "$LEDGER") COMFY_COLAB_CLI_SOURCE=$(printf '%q' "$MODEL_SOURCE")"
+cmd+=" COMFY_COLAB_CLI_SYSPY=$(printf '%q' "$PY")"
 cmd+=" $(printf '%q' "$VENV_PY") $(printf '%q ' "${args[@]}") 2>&1 | tee -a $(printf '%q' "$REMOTE_LOG")"
 cmd+="; echo $(printf '%q' "$EXIT_MARK") | tee -a $(printf '%q' "$REMOTE_LOG"); sleep infinity"
 

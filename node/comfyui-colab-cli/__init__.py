@@ -5,6 +5,7 @@ ComfyUI の画面に「停止」ボタンを足し、押されたことを手元
 start.bat のウィンドウがトンネル越しに GET /colab_cli/stop を数秒ごとに確かめて実行する。
 ボタンのダイアログからは、ComfyUI の出力をまとめて ZIP でダウンロードすることもできる。
 「モデル」ボタンからは、Hugging Face と Civitai のモデルをランタイムか Google ドライブにダウンロードできる。
+ランタイムに写しが無いモデルは、ノードで使われたときにランタイムへ取ってくる。取り方は model_sources.py に書いてある。
 """
 
 import asyncio
@@ -13,6 +14,7 @@ import os
 from pathlib import Path
 import queue
 import sys
+import threading
 import time
 import zipfile
 
@@ -105,6 +107,8 @@ def _downloader_args(command):
     drive_models = os.environ.get("COMFY_COLAB_CLI_DRIVE_MODELS", "")
     if drive_models:
         args += ["--drive-models", drive_models]
+    if command == "download" and os.environ.get("COMFY_COLAB_CLI_LEDGER"):
+        args += ["--ledger", os.environ["COMFY_COLAB_CLI_LEDGER"]]
     return args
 
 
@@ -188,6 +192,189 @@ async def colab_cli_model_cancel(request):
     if process is not None and process.returncode is None:
         process.terminate()
     return _answer({"state": "cancelling"})
+
+
+# ---- 台帳とモデルの取得 ----
+# 台帳にしかないモデルも一覧に出し、ノードで使われたときにランタイムへ取ってくる。
+# 一覧と場所を返す ComfyUI の関数を包む。包めなかったときは、今までどおりドライブから直接読む。
+
+RUNTIME_MODELS = os.environ.get("COMFY_COLAB_CLI_MODELS", "")
+DRIVE_MODELS = os.environ.get("COMFY_COLAB_CLI_DRIVE_MODELS", "")
+LEDGER = None
+FETCHER = None
+
+
+def _notify(data):
+    try:
+        PromptServer.instance.send_sync("colab_cli.model_fetch", data)
+    except Exception:
+        pass
+
+
+def _interrupted():
+    try:
+        import comfy.model_management
+        return comfy.model_management.processing_interrupted()
+    except Exception:
+        return False
+
+
+def _executing():
+    """ノードの実行中か。一覧の表示やメタデータの問い合わせでは、大きなダウンロードを始めないため。"""
+    try:
+        from comfy_execution.utils import get_executing_context
+        if get_executing_context() is not None:
+            return True
+    except Exception:
+        pass
+    return "prompt_worker" in threading.current_thread().name
+
+
+def _inside(path, root):
+    try:
+        return Path(os.path.realpath(path)).relative_to(os.path.realpath(root)).as_posix()
+    except ValueError:
+        return None
+
+
+def _model_tops(folder_paths, folder_name):
+    """ComfyUI の種類が読むフォルダーのうち、ランタイムとドライブの models の下にあるものの相対パス。"""
+    tops = set()
+    for path in folder_paths.folder_names_and_paths.get(folder_paths.map_legacy(folder_name), ([], set()))[0]:
+        for root in (RUNTIME_MODELS, DRIVE_MODELS):
+            relative = _inside(path, root) if root else None
+            if relative and relative != ".":
+                tops.add(relative)
+    return tops
+
+
+def _install_model_hooks():
+    global LEDGER, FETCHER
+    if not RUNTIME_MODELS:
+        return
+    import folder_paths
+    sys.path.insert(0, str(STAGE))
+    import model_sources
+    state = STAGE / "state"
+    LEDGER = model_sources.Ledger(os.environ.get("COMFY_COLAB_CLI_LEDGER", ""), state / "ledger.lock")
+    FETCHER = model_sources.Fetcher(
+        RUNTIME_MODELS, DRIVE_MODELS, LEDGER, os.environ.get("COMFY_COLAB_CLI_SOURCE", "drive"),
+        tokens_file=str(state / "tokens.json"), system_python=os.environ.get("COMFY_COLAB_CLI_SYSPY", ""),
+        state_dir=str(state), notify=_notify, interrupted=_interrupted)
+    original_full_path = folder_paths.get_full_path
+    original_list = folder_paths.get_filename_list
+
+    def ledger_key(folder_name, filename):
+        entries = LEDGER.entries()
+        for top in _model_tops(folder_paths, folder_name):
+            key = f"{top}/{filename}"
+            if key in entries:
+                return key
+        return None
+
+    def get_full_path(folder_name, filename):
+        path = original_full_path(folder_name, filename)
+        if not _executing():
+            return path
+        try:
+            if path is not None:
+                key = _inside(path, DRIVE_MODELS) if DRIVE_MODELS else None
+                if not key or not FETCHER.drive_ready():
+                    return path
+                local = FETCHER.ensure_local(key, Path(path))
+                return str(local) if local else path
+            key = ledger_key(folder_name, filename)
+            if key:
+                return str(FETCHER.ensure_local(key))
+        except model_sources.Stopped:
+            import comfy.model_management
+            raise comfy.model_management.InterruptProcessingException()
+        except model_sources.Failure as failure:
+            if path is None:
+                raise FileNotFoundError(str(failure)) from None
+        except Exception as error:  # 取れなくても、今までどおりの場所を返す
+            print(f"[comfyui-colab-cli] model fetch: {type(error).__name__}: {error}", flush=True)
+        return path
+
+    def get_filename_list(folder_name):
+        names = original_list(folder_name)
+        try:
+            tops = _model_tops(folder_paths, folder_name)
+            extensions = folder_paths.folder_names_and_paths[folder_paths.map_legacy(folder_name)][1]
+            extra = set()
+            for key in LEDGER.entries():
+                for top in tops:
+                    if key.startswith(top + "/"):
+                        extra.add(key[len(top) + 1:])
+            extra = set(folder_paths.filter_files_extensions(extra, extensions)) - set(names)
+            if extra:
+                return sorted(set(names) | extra)
+        except Exception as error:
+            print(f"[comfyui-colab-cli] model list: {type(error).__name__}: {error}", flush=True)
+        return names
+
+    folder_paths.get_full_path = get_full_path
+    folder_paths.get_filename_list = get_filename_list
+
+
+def _backup_loop():
+    """ComfyUI-Manager などがランタイムに入れたモデルを、あとからドライブにも写す。
+    台帳にあるものは、ランタイムだけと選ばれたものか、元の URL から取ってきた写しなので写さない。"""
+    import model_sources
+    started = time.time()
+    seen = {}
+    runtime, drive = Path(RUNTIME_MODELS), Path(DRIVE_MODELS)
+    while True:
+        time.sleep(30)
+        try:
+            if not (drive.parent.is_dir() and runtime.is_dir()):
+                continue
+            known = set(LEDGER.all()) if LEDGER else set()
+            for key, path, size, mtime in model_sources.backup_candidates(runtime, drive, known, started):
+                # 書き終わったものだけを写す。続けて 2 回、同じ大きさと時刻だったら書き終わったとみなす
+                if seen.get(key) != (size, mtime) or time.time() - mtime < 60:
+                    seen[key] = (size, mtime)
+                    continue
+                if model_sources.copy_to_drive(path, drive / key):
+                    print(f"[comfyui-colab-cli] copied to Google Drive: {key}", flush=True)
+                    _notify({"state": "backed_up", "name": key, "message": model_sources.t("backed_up", name=key)})
+                seen.pop(key, None)
+        except Exception as error:
+            print(f"[comfyui-colab-cli] Drive copy: {type(error).__name__}: {error}", flush=True)
+
+
+try:
+    _install_model_hooks()
+    if FETCHER and DRIVE_MODELS:
+        threading.Thread(target=_backup_loop, name="colab-cli-drive-copy", daemon=True).start()
+except Exception as error:
+    print(f"[comfyui-colab-cli] model hooks are off: {type(error).__name__}: {error}", flush=True)
+
+
+@routes.get("/colab_cli/models/ledger")
+async def colab_cli_ledger(request):
+    """台帳の中身。raw=1 なら外した記録も含めてそのまま返す。手元の WSL へ写すときに使う。"""
+    if LEDGER is None:
+        return _answer({"models": [], "available": False})
+    models = await asyncio.get_running_loop().run_in_executor(None, LEDGER.all)
+    if request.query.get("raw") == "1":
+        return _answer({"version": 1, "models": models})
+    listed = [{"key": key, "page": entry.get("page", ""), "size": entry.get("size", 0)}
+              for key, entry in sorted(models.items()) if not entry.get("removed")]
+    return _answer({"models": listed, "available": True})
+
+
+@routes.post("/colab_cli/models/ledger/remove")
+async def colab_cli_ledger_remove(request):
+    """台帳から外す。ファイルは消さない。"""
+    body, refused = await _json_body(request)
+    if refused:
+        return refused
+    key = body.get("key")
+    if LEDGER is None or not isinstance(key, str) or key not in LEDGER.entries():
+        return _answer({"error": "not in the ledger"}, 404)
+    await asyncio.get_running_loop().run_in_executor(None, LEDGER.remove, key)
+    return _answer({"removed": key})
 
 
 # ---- 出力の ZIP ----

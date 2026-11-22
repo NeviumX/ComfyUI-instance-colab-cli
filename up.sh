@@ -53,8 +53,9 @@ main() {
     wait_ssh
     check_gpu
 
-    # 3. Google ドライブ
+    # 3. Google ドライブ。Drive API を使うなら、そのトークンも送る
     ensure_drive
+    ensure_drive_api
 
     # 4. ComfyUI の準備と起動。VM 上の tmux で動かす
     log "$(msg preparing)"

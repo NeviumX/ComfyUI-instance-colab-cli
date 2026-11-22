@@ -79,8 +79,8 @@ _m drive_already \
     "Google ドライブはマウント済みです。" \
     "Google Drive is already mounted."
 _m drive_mounting \
-    "Google ドライブをマウントします。認可の URL が表示されたらブラウザで開いて許可し、このウィンドウで Enter を押してください。" \
-    "Mounting Google Drive. If an authorization URL appears, open it in a browser, allow access, then press Enter in this window."
+    "Google ドライブをマウントします。開いたブラウザで許可し、このウィンドウで Enter を押してください。Colab は 2 分ほどしか待たないので、早めに済ませてください。" \
+    "Mounting Google Drive. Allow access in the browser that opens, then press Enter in this window. Colab waits only about 2 minutes, so do it soon."
 _m drive_ready \
     "Google ドライブの %s のモデルを使います。" \
     "Using the models in %s on Google Drive."
@@ -151,8 +151,8 @@ _m md_filename \
     "ファイル名。空のままなら URL やサイトの名前を使います: " \
     "File name. Leave empty to use the name from the URL or the site: "
 _m md_where \
-    "保存する場所:\n  1) ランタイムだけ。速く、ランタイムを削除すると消えます\n  2) Google ドライブにも残す。ランタイムに落としてから、ドライブにコピーします" \
-    "Save to:\n  1) The runtime only. Fast, and gone when the runtime is deleted\n  2) Google Drive too. Downloaded to the runtime first, then copied to Drive"
+    "保存する場所:\n  1) ランタイムだけ。ランタイムを削除すると消えますが、次回もモデルの一覧に出て、使うときにダウンロードし直します\n  2) Google ドライブにも残す。ランタイムに落としてから、ドライブにコピーします" \
+    "Save to:\n  1) The runtime only. Gone when the runtime is deleted, but it stays in the model lists and is downloaded again when used\n  2) Google Drive too. Downloaded to the runtime first, then copied to Drive"
 _m md_where_prompt \
     "1 か 2 を選んでください。Enter だけなら 2: " \
     "Pick 1 or 2. Enter alone picks 2: "
@@ -171,6 +171,36 @@ _m md_done \
 _m token_invalid \
     "%s に使えない文字が入っているので、送りません。" \
     "%s contains characters that cannot be used, so it is not sent."
+_m drive_api_no_client \
+    "Drive API の OAuth クライアントの設定ファイル %s が無いので、ドライブのモデルは Drive API を使わずにコピーします。" \
+    "No OAuth client file %s for the Drive API, so models on Drive are copied without it."
+_m drive_api_authorize \
+    "Drive API を認可します。ドライブを読むことだけを許可します。" \
+    "Authorizing the Drive API. Only reading Drive is allowed."
+_m drive_api_auth_failed \
+    "Drive API を認可できませんでした。ドライブのモデルは Drive API を使わずにコピーします。認可し直すには drive-auth.bat を実行してください。" \
+    "Could not authorize the Drive API. Models on Drive are copied without it. Run drive-auth.bat to authorize again."
+_m drive_api_reauthorize \
+    "Drive API のトークンが無効になったので、認可し直します。" \
+    "The Drive API token is no longer valid, so authorizing again."
+_m drive_api_token_failed \
+    "Drive API のトークンを取り直せませんでした。ドライブのモデルは Drive API を使わずにコピーします。" \
+    "Could not renew the Drive API token. Models on Drive are copied without it."
+_m drive_api_send_failed \
+    "Drive API のトークンを VM に送れませんでした。" \
+    "Could not send the Drive API token to the VM."
+_m drive_api_sent \
+    "Drive API のトークンを VM に送りました。" \
+    "Sent the Drive API token to the VM."
+_m drive_api_not_running \
+    "ランタイムが無いか、ドライブがマウントされていないので、トークンは次の起動のときに送ります。" \
+    "No runtime or no mounted Drive, so the token is sent at the next start."
+_m ledger_upload_failed \
+    "モデルの台帳を VM に送れませんでした。" \
+    "Could not send the model ledger to the VM."
+_m ledger_pull_failed \
+    "モデルの台帳を手元に写せませんでした。" \
+    "Could not copy the model ledger back here."
 _m token_upload_failed \
     "モデルのダウンロード用のトークンを VM に送れませんでした。" \
     "Could not send the model download tokens to the VM."
@@ -449,6 +479,9 @@ _m r_saving \
 _m r_save_failed \
     "環境を保存できませんでした。起動は続けます。" \
     "Could not save the environment. Continuing startup."
+_m r_ledger_merge_failed \
+    "手元から送ったモデルの台帳を合わせられませんでした。起動は続けます。" \
+    "Could not merge the model ledger sent from here. Continuing startup."
 _m r_drive_models \
     "Google ドライブのモデルを ComfyUI に追加しました: %s" \
     "Added the models on Google Drive to ComfyUI: %s"

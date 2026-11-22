@@ -67,8 +67,10 @@ log "$(msg md_starting "$folder")"
 code=0
 tokens_json | rssh "MSG_LANG=$MSG_LANG $runner download $models_arg --state $(printf '%q' "$STAGE_DIR/state") \
     --url $(printf '%q' "$url") --folder $(printf '%q' "$folder") --filename $(printf '%q' "$filename") \
+    --ledger \"\$(cat $(printf '%q' "$STAGE_DIR/state/ledger-path") 2>/dev/null)\" \
     $to_drive --tokens-stdin --bar" || code=$?
 if [[ "$code" != 0 ]]; then
     die "$(msg md_failed)"
 fi
+pull_ledger
 log "$(msg md_done)"

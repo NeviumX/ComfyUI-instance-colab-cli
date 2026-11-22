@@ -7,6 +7,7 @@ require_cmds colab ssh curl ss tar
 session_exists || die "$(msg runtime_missing_start "$COLAB_SESSION")"
 rm -f "$STOPPING_FILE"
 detect_drive
+send_drive_token || true
 if ! remote_healthy; then
     warn "$(msg comfy_unresponsive_redo)"
     remote_start 0

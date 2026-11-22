@@ -30,6 +30,7 @@ Change the GPU, ports and other settings in `config.env`. Settings of your own c
 | Delete the runtime | `stop.bat` | `./down.sh` |
 | Update ComfyUI | `update.bat` | `./update.sh` |
 | Download a model | `model-download.bat` | `./model-download.sh` |
+| Authorize the Drive API again, or revoke it | `drive-auth.bat` | `./drive-auth.sh` / `./drive-auth.sh revoke` |
 | Show status | `status.bat` | `./status.sh` |
 | Reconnect a closed tunnel | `start.bat` | `./tunnel.sh` |
 | Copy the outputs to this PC | | `./pull-outputs.sh` |
@@ -68,7 +69,8 @@ For Hugging Face, copy the URL of the file page from your browser. For Civitai, 
 
 Choose where to save:
 
-- **The runtime only:** the fastest, and gone when the runtime is deleted.
+- **The runtime only:** gone when the runtime is deleted, but it is recorded in the ledger and stays in the model lists on the next runtime.
+  When a node uses it, it is downloaded again from the recorded source.
 - **Google Drive too:** downloaded to the runtime first, then copied to Drive. ComfyUI can use it as soon as it is on the runtime.
 
 When the download is done, press R in ComfyUI to see the model in the lists. A file with the same name is never overwritten.
@@ -81,6 +83,17 @@ CIVITAI_TOKEN=...
 ```
 
 Each token is sent only to its own site.
+
+### The model ledger
+
+Models downloaded with this tool are recorded in a ledger with where they are saved and where they came from.
+Hugging Face models are recorded with the commit they were downloaded from, so the same content can be downloaded again later.
+
+- With Google Drive, the ledger is `My Drive/ComfyUI-Colab/model-sources.json`. Without it, the ledger is `model-sources.json` in this folder.
+  The local ledger is sent to the runtime at every start and new records come back from the runtime, so the records carry over either way.
+- Models in the ledger show in the ComfyUI model lists even when they are on neither the runtime nor Drive.
+  Remove one under "Models in the ledger" in the download dialog to hide it from the lists. No file is deleted.
+- Models downloaded by ComfyUI-Manager and similar tools are not in the ledger, because their source is unknown.
 
 ### Updating ComfyUI
 
@@ -118,7 +131,36 @@ My Drive/
         └── ...
 ```
 
-Models downloaded by ComfyUI-Manager and similar tools are saved to this folder as well, so the next runtime can use them.
+ComfyUI reads the copy on the runtime first when there is one. When a node uses a model with no copy on the runtime, the model is first brought to the runtime and then loaded.
+For large models this is often faster than reading from the mounted Drive directly.
+Choose the order with `MODEL_SOURCE` in `config.env`.
+
+- **`MODEL_SOURCE=drive`:** the default. Tries a parallel download with the Drive API, then a sequential copy from Drive, then the source in the ledger.
+- **`MODEL_SOURCE=url`:** tries the source in the ledger first, then Drive.
+
+While a model is being brought over, the progress is shown at the bottom right of ComfyUI. If nothing works, or the runtime disk is too full, the model is read from Drive directly as before.
+If the ledger has a model with the same name but a different size from the one on Drive, the one on Drive is used.
+
+Models downloaded by ComfyUI-Manager and similar tools are saved on the runtime first and copied to Drive automatically once they are complete, so the next runtime can use them.
+
+### Setting up the Drive API
+
+With the Drive API, models on Drive are downloaded in parallel. Make an OAuth client in your own Google Cloud project and authorize it once.
+Everything works without it too. Models on Drive are then copied one part after another.
+
+1. Create a project in the [Google Cloud console](https://console.cloud.google.com/). No billing account is needed.
+2. Under APIs & Services, Library, enable the **Google Drive API**.
+3. Set up the OAuth consent screen. Choose External as the audience and add your own Google account as a test user.
+4. Under Credentials, create an OAuth client ID. The application type is **Desktop app**.
+5. Download the client's JSON and save it in this folder as `drive-oauth-client.json`.
+
+The next `start.bat` shows an authorization URL after Drive is mounted and opens the browser. Allow access with your Google account, and the browser says it is authorized.
+
+- Only reading Drive is allowed.
+- The long-lived refresh token is kept only in `.state/drive-token.json` in this folder. The Colab VM gets only a token that expires in about an hour, and the `start.bat` window sends a new one every 40 minutes.
+- While the OAuth consent screen is in Testing, the authorization expires every 7 days. When it does, the next start shows the authorization URL again.
+  In Production it does not expire, but allowing access shows an "unverified app" warning. For an app you made yourself, you can go on.
+- To stop using it, run `drive-auth.bat revoke`. It asks Google to revoke the token and deletes it from this PC.
 
 ### Saving and restoring the environment
 

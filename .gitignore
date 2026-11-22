@@ -3,3 +3,5 @@ config.local.env
 outputs/
 docs/
 __pycache__/
+model-sources.json
+drive-oauth-client.json

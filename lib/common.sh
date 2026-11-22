@@ -31,6 +31,10 @@ DRIVE_MOUNT="${DRIVE_MOUNT:-/content/drive}"
 DRIVE_MODELS="$DRIVE_MOUNT/MyDrive/$DRIVE_FOLDER/models"
 # shellcheck disable=SC2034  # remote_env で Colab VM に渡す
 DRIVE_STORAGE="$DRIVE_MOUNT/MyDrive/$DRIVE_FOLDER/environment"
+# shellcheck disable=SC2034  # remote_env で Colab VM に渡す
+DRIVE_LEDGER="$DRIVE_MOUNT/MyDrive/$DRIVE_FOLDER/model-sources.json"
+# ドライブを使わないときの台帳。起動のたびに VM へ送り、VM で増えた記録はここへ戻す
+LEDGER_LOCAL="$ROOT/model-sources.json"
 # 手元から送るファイルと、保存の状態の置き場所
 STAGE_DIR="${STAGE_DIR:-/content/.comfy-colab-cli}"
 COMFY_DIR="$COMFY_BASE/environment/ComfyUI"
@@ -116,7 +120,7 @@ detect_drive() {
     if [[ "$USE_DRIVE" == 1 ]] && drive_mounted; then DRIVE_READY=1; fi
 }
 
-# USE_DRIVE=1 なら Drive をマウントする。初回は Google の認可画面の URL が表示され、Enter を待つ。
+# USE_DRIVE=1 なら Drive をマウントする。Google の認可画面の URL を表示してブラウザで開き、Enter を待つ。
 # マウントできなくても起動は続け、モデルは VM の中だけに置く。
 ensure_drive() {
     DRIVE_READY=0
@@ -127,7 +131,8 @@ ensure_drive() {
         return 0
     fi
     log "$(msg drive_mounting)"
-    colab drivemount -s "$COLAB_SESSION" "$DRIVE_MOUNT" || true
+    # 認可のページを Windows のブラウザで開かせる。BROWSER は Python の webbrowser が読む
+    PATH="$ROOT/lib/browser:$PATH" BROWSER=open-url.sh colab drivemount -s "$COLAB_SESSION" "$DRIVE_MOUNT" || true
     if drive_mounted; then
         DRIVE_READY=1
         log "$(msg drive_ready "MyDrive/$DRIVE_FOLDER/models")"
@@ -159,18 +164,90 @@ remote_start() {
     # 表示する文章も一緒に送り、言語は手元で決めたものを使わせる
     cat "$ROOT/lib/messages.sh" "$ROOT/lib/remote-setup.sh" |
         rssh "$(remote_env COMFY_REPO COMFY_REF COMFY_BASE REMOTE_PORT INSTALL_MANAGER CUSTOM_NODES COMFY_EXTRA_ARGS \
-                APT_PACKAGES REMOTE_LOG FORCE_RESTART MSG_LANG DRIVE_READY DRIVE_MODELS DRIVE_STORAGE \
+                APT_PACKAGES REMOTE_LOG FORCE_RESTART MSG_LANG DRIVE_READY DRIVE_MODELS DRIVE_STORAGE DRIVE_LEDGER MODEL_SOURCE \
                 SAVE_ENVIRONMENT RESTORE_ENVIRONMENT SAVE_INTERVAL_SEC AUTO_UPDATE USE_SAGE_ATTENTION PULL_OUTPUTS_ON_STOP \
                 STAGE_DIR TMUX_SESSION SAVE_SESSION NODE_NAME) bash -s"
 }
 
-# 停止ボタンのカスタムノード、環境を保存・復元・更新する comfy_env.py、モデルをダウンロードする model_download.py を VM へ送る
+# 停止ボタンのカスタムノード、環境を保存・復元・更新する comfy_env.py、モデルをダウンロードする model_download.py、
+# 台帳とモデルの取得の model_sources.py を VM へ送る
 upload_files() {
     tar -C "$ROOT" --exclude=__pycache__ --transform 's#^node/#custom_nodes/#;s#^lib/##' \
-        -cf - "node/$NODE_NAME" lib/comfy_env.py lib/model_download.py |
+        -cf - "node/$NODE_NAME" lib/comfy_env.py lib/model_download.py lib/model_sources.py |
         rssh "mkdir -p $STAGE_DIR && rm -rf $STAGE_DIR/custom_nodes/$NODE_NAME && tar -C $STAGE_DIR -xf -" ||
         die "$(msg node_upload_failed)"
     upload_tokens
+    upload_ledger
+}
+
+# 手元の台帳を VM へ送る。VM はドライブの台帳か、VM の中の台帳に合わせて使う
+upload_ledger() {
+    [[ -f "$LEDGER_LOCAL" ]] || return 0
+    rssh "mkdir -p $STAGE_DIR/state && cat > $STAGE_DIR/state/model-sources.local.json" < "$LEDGER_LOCAL" ||
+        warn "$(msg ledger_upload_failed)"
+}
+
+# ---- Drive API ----
+# 更新用のトークンは手元にだけ置き、VM には 1 時間ほどで切れるアクセストークンだけを送る
+DRIVE_TOKEN_LOCAL="$STATE_DIR/drive-token.json"
+
+drive_client_file() {
+    case "$DRIVE_OAUTH_CLIENT" in
+        /*) printf '%s' "$DRIVE_OAUTH_CLIENT" ;;
+        *)  printf '%s' "$ROOT/$DRIVE_OAUTH_CLIENT" ;;
+    esac
+}
+
+drive_oauth() {
+    MSG_LANG="$MSG_LANG" python3 "$ROOT/lib/drive_oauth.py" "$1" --client "$(drive_client_file)" --token "$DRIVE_TOKEN_LOCAL" "${@:2}"
+}
+
+# USE_DRIVE_API=1 でドライブがマウントされていれば、初回は認可してからトークンを VM へ送る。up.sh から呼ぶ
+ensure_drive_api() {
+    [[ "$USE_DRIVE_API" == 1 && "$DRIVE_READY" == 1 ]] || return 0
+    if [[ ! -f "$(drive_client_file)" ]]; then
+        log "$(msg drive_api_no_client "$DRIVE_OAUTH_CLIENT")"
+        return 0
+    fi
+    if [[ ! -f "$DRIVE_TOKEN_LOCAL" ]]; then
+        log "$(msg drive_api_authorize)"
+        drive_oauth authorize || { warn "$(msg drive_api_auth_failed)"; return 0; }
+    fi
+    send_drive_token ask || true
+}
+
+# アクセストークンを取り直して VM へ送る。引数 ask なら、トークンが無効になっていたときに認可し直す。送れなければ 1 を返す
+send_drive_token() {
+    local mode="${1:-}" out="" code=0
+    [[ "$USE_DRIVE_API" == 1 && "$DRIVE_READY" == 1 && -f "$(drive_client_file)" && -f "$DRIVE_TOKEN_LOCAL" ]] || return 0
+    out="$(drive_oauth access)" || code=$?
+    if [[ "$code" == 3 && "$mode" == ask ]]; then
+        warn "$(msg drive_api_reauthorize)"
+        code=0
+        if drive_oauth authorize; then out="$(drive_oauth access)" || code=$?; else code=1; fi
+    fi
+    if [[ "$code" != 0 ]]; then
+        warn "$(msg drive_api_token_failed)"
+        return 1
+    fi
+    printf '%s' "$out" | rssh "umask 077 && mkdir -p $STAGE_DIR/state && cat > $STAGE_DIR/state/.drive-token.tmp &&
+        mv -f $STAGE_DIR/state/.drive-token.tmp $STAGE_DIR/state/drive-token.json" || { warn "$(msg drive_api_send_failed)"; return 1; }
+}
+
+# 接続だけを解除するときに、VM に残したアクセストークンを消す
+clear_drive_token() {
+    rssh "rm -f $STAGE_DIR/state/drive-token.json" >/dev/null 2>&1 || true
+}
+
+# VM が使っている台帳を手元の台帳に合わせる。ドライブを使わないときも、ダウンロードの記録が次のランタイムへ残る
+pull_ledger() {
+    local tmp
+    tmp="$(mktemp)"
+    if rssh "p=\$(cat $STAGE_DIR/state/ledger-path 2>/dev/null) && test -f \"\$p\" && cat \"\$p\"" > "$tmp" 2>/dev/null &&
+       [[ -s "$tmp" ]]; then
+        python3 "$ROOT/lib/model_sources.py" merge --into "$LEDGER_LOCAL" --from "$tmp" || warn "$(msg ledger_pull_failed)"
+    fi
+    rm -f "$tmp"
 }
 
 # モデルのダウンロード用のトークンを JSON にする。値は英数字と記号の一部だけを受け付ける
@@ -382,6 +459,7 @@ teardown_runtime() {
         if [[ "$PULL_OUTPUTS_ON_STOP" == 1 ]]; then
             pull_outputs || warn "$(msg pull_failed)"
         fi
+        pull_ledger
         if ! save_environment; then
             warn "$(msg env_save_failed)"
             ans=n
@@ -495,7 +573,7 @@ run_tunnel_foreground() {
 # トンネルを保っている間、停止ボタンと ComfyUI の応答を見張る。
 # Colab 側で落ちていたら起動し直し、トンネルだけが切れていたら張り直す。
 watch_comfy() {
-    local fails=0 next_check=$((SECONDS + WATCH_SEC)) asked
+    local fails=0 next_check=$((SECONDS + WATCH_SEC)) next_ledger=$((SECONDS + 300)) next_token=$((SECONDS + 2400)) asked
     while true; do
         sleep "$BUTTON_POLL_SEC"
         asked="$(button_request)"
@@ -513,6 +591,8 @@ watch_comfy() {
             disconnect)
                 log "$(msg button_disconnect)"
                 button_accept
+                pull_ledger
+                clear_drive_token
                 # ページが受け取りを表示できるよう、少し待ってから切る
                 sleep 3
                 TUNNEL_END=disconnected
@@ -522,6 +602,16 @@ watch_comfy() {
 
         (( SECONDS >= next_check )) || continue
         next_check=$((SECONDS + WATCH_SEC))
+        # 台帳は 5 分ごとに手元へ写す。ウィンドウを閉じられても、それまでの記録は残る
+        if (( SECONDS >= next_ledger )); then
+            next_ledger=$((SECONDS + 300))
+            pull_ledger
+        fi
+        # Drive API のアクセストークンは 1 時間ほどで切れるので、40 分ごとに送り直す
+        if (( SECONDS >= next_token )); then
+            next_token=$((SECONDS + 2400))
+            send_drive_token || true
+        fi
         if local_healthy; then
             fails=0
             continue

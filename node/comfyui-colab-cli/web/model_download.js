@@ -16,7 +16,7 @@ const TEXTS = {
     url: "URL",
     filename: "ファイル名 空のままなら URL やサイトの名前を使います",
     where: "保存する場所",
-    runtime: "ランタイムだけ ランタイムを削除すると消えます",
+    runtime: "ランタイムだけ ランタイムを削除すると消えますが、次回もモデルの一覧に出て、使うときにダウンロードし直します",
     drive: "Googleドライブにも残す ランタイムに落としてからドライブにコピーします",
     noDrive: "Googleドライブがマウントされていないので、ランタイムにだけ保存できます。",
     start: "ダウンロード",
@@ -31,6 +31,11 @@ const TEXTS = {
     copying: "Google ドライブへコピー中",
     failed: "失敗しました",
     cancelled: "中止しました。",
+    ledger: "台帳のモデル",
+    ledgerExplain: "このツールでダウンロードしたモデルです。台帳から外すと、ランタイムにもドライブにも無いモデルは一覧に出なくなります。ファイルは消しません。",
+    ledgerEmpty: "まだありません。",
+    remove: "台帳から外す",
+    removeFailed: "台帳から外せませんでした。",
   },
   en: {
     button: "Models",
@@ -41,7 +46,7 @@ const TEXTS = {
     url: "URL",
     filename: "File name. Leave empty to use the name from the URL or the site",
     where: "Save to",
-    runtime: "The runtime only. Fast, and gone when the runtime is deleted",
+    runtime: "The runtime only. Gone when the runtime is deleted, but it stays in the model lists and is downloaded again when used",
     drive: "Google Drive too. Downloaded to the runtime first, then copied to Drive",
     noDrive: "Google Drive is not mounted, so the model can be saved on the runtime only.",
     start: "Download",
@@ -56,6 +61,11 @@ const TEXTS = {
     copying: "Copying to Google Drive",
     failed: "Failed",
     cancelled: "Cancelled.",
+    ledger: "Models in the ledger",
+    ledgerExplain: "Models downloaded with this tool. A model removed from the ledger no longer shows in the lists unless it is on the runtime or on Drive. No file is deleted.",
+    ledgerEmpty: "None yet.",
+    remove: "Remove from the ledger",
+    removeFailed: "Could not remove it from the ledger.",
   },
 };
 
@@ -111,6 +121,13 @@ function mount(settings) {
     #colab-model-dialog button:disabled { opacity: .45; cursor: default; }
     #colab-model-dialog button.colab-model-primary { background: #2563eb; border-color: #2563eb; color: #fff; }
     #colab-model-dialog button.colab-model-primary:hover:enabled { background: #3b82f6; }
+    #colab-model-dialog details { margin: 0 0 .75rem; font-size: 12.5px; }
+    #colab-model-dialog summary { cursor: pointer; color: #bbb; }
+    #colab-model-dialog details p { color: #999; margin: .3rem 0; }
+    #colab-model-dialog ul { list-style: none; margin: 0; padding: 0; max-height: 12rem; overflow: auto; }
+    #colab-model-dialog li { display: flex; gap: .5rem; align-items: center; justify-content: space-between; padding: .2rem 0;
+      border-bottom: 1px solid #333; word-break: break-all; }
+    #colab-model-dialog li button { flex: none; font-size: 12px; padding: .2rem .5rem; }
   `;
   const add = (parent, tag, content, name) => {
     const element = document.createElement(tag);
@@ -143,6 +160,10 @@ function mount(settings) {
   };
   const toRuntime = choice("runtime", text.runtime);
   const toDrive = choice("drive", text.drive);
+  const ledger = add(dialog, "details");
+  const ledgerTitle = add(ledger, "summary", text.ledger);
+  add(ledger, "p", text.ledgerExplain);
+  const ledgerList = add(ledger, "ul");
   const bar = add(dialog, "progress");
   bar.hidden = true;
   const status = add(dialog, "p", "", "colab-model-status");
@@ -203,6 +224,7 @@ function mount(settings) {
     if (progress.state === "failed") status.textContent = `${text.failed}: ${progress.message || ""}`;
     else if (progress.state === "cancelled") status.textContent = text.cancelled;
     else if (progress.state === "done") status.textContent = progress.message || "";
+    if (progress.state === "done") loadLedger();
     return false;
   };
   const poll = async () => {
@@ -236,6 +258,39 @@ function mount(settings) {
       status.textContent = listing.drive ? "" : text.noDrive;
     } catch (error) {
       status.textContent = text.loadFailed;
+    }
+  };
+
+  const loadLedger = async () => {
+    try {
+      const answer = await api.fetchApi("/colab_cli/models/ledger", { cache: "no-store" });
+      if (!answer.ok) throw new Error(answer.status);
+      const listing = await answer.json();
+      ledger.hidden = !listing.available;
+      ledgerTitle.textContent = `${text.ledger} (${listing.models.length})`;
+      ledgerList.replaceChildren();
+      if (!listing.models.length) add(ledgerList, "li", text.ledgerEmpty);
+      for (const model of listing.models) {
+        const item = add(ledgerList, "li");
+        const label = add(item, "span", `${model.key}  ${model.size ? sizeText(model.size) : ""}`);
+        if (model.page) label.title = model.page;
+        const remove = add(item, "button", text.remove);
+        remove.addEventListener("click", async () => {
+          remove.disabled = true;
+          try {
+            const result = await api.fetchApi("/colab_cli/models/ledger/remove", {
+              method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: model.key }),
+            });
+            if (!result.ok) throw new Error(result.status);
+            await loadLedger();
+          } catch (error) {
+            status.textContent = text.removeFailed;
+            remove.disabled = false;
+          }
+        });
+      }
+    } catch (error) {
+      ledger.hidden = true;
     }
   };
 
@@ -283,6 +338,7 @@ function mount(settings) {
   button.addEventListener("click", async () => {
     dialog.showModal();
     await loadFolders();
+    loadLedger();
     poll();  // 閉じている間に進んでいたダウンロードも表示する
   });
 

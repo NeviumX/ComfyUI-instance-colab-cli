@@ -4,11 +4,12 @@ ComfyUI の画面からはノードがこのファイルを別のプロセスで
 
     python3 model_download.py folders --models DIR [--drive-models DIR]
     python3 model_download.py download --models DIR [--drive-models DIR] --state DIR
-                                       --url URL --folder NAME [--filename NAME] [--to-drive]
+                                       --url URL --folder NAME [--filename NAME] [--to-drive] [--ledger FILE]
                                        [--tokens-file FILE | --tokens-stdin] [--progress-file FILE] [--bar]
 
 ランタイムの models に .part として書き、書き終えてから正しい名前にする。SHA256 は計算して表示する。--to-drive なら、続けて Google ドライブにもコピーする。
 ランタイムのディスクに先に書くので、ComfyUI ではすぐに使える。ドライブへの書き込みは遅いことがあるため、この順にしている。
+--ledger があれば、保存先とダウンロード元を台帳に記録する。台帳にあるモデルは、次のランタイムでも ComfyUI の一覧に出る。
 """
 
 import argparse
@@ -173,8 +174,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
 
-def open_download(url, token):
-    """転送をたどってダウンロードの応答を返す。トークンは最初の接続先にだけ送る。"""
+def open_download(url, token, seen=None):
+    """転送をたどってダウンロードの応答を返す。トークンは最初の接続先にだけ送る。
+    seen を渡すと、途中の応答が示した Hugging Face のコミットを "commit" に入れる。"""
     first_host = checked_https(url).hostname
     current = url
     for _ in range(11):
@@ -186,6 +188,9 @@ def open_download(url, token):
             response = _OPENER.open(request, timeout=60)
         except HTTPError as error:
             if error.code in {301, 302, 303, 307, 308}:
+                commit = error.headers.get("X-Repo-Commit") or ""
+                if seen is not None and re.fullmatch(r"[0-9a-f]{40}", commit):
+                    seen.setdefault("commit", commit)
                 location = error.headers.get("Location")
                 error.close()
                 if not location:
@@ -193,6 +198,9 @@ def open_download(url, token):
                 current = urljoin(current, location)
                 continue
             raise
+        commit = response.headers.get("X-Repo-Commit") or ""
+        if seen is not None and re.fullmatch(r"[0-9a-f]{40}", commit):
+            seen.setdefault("commit", commit)
         content_type = (response.headers.get("Content-Type") or "").lower()
         if "text/html" in content_type or "application/json" in content_type:
             response.close()
@@ -312,6 +320,18 @@ def copy_with_progress(source, target, progress):
         partial.unlink(missing_ok=True)
 
 
+def pinned_url(url, commit):
+    """Hugging Face の URL を、ダウンロードしたときのコミットに固定する。後で同じ中身を取り直せるようにするため。"""
+    if not commit:
+        return url
+    parsed = urlsplit(url)
+    parts = parsed.path.split("/")
+    if parsed.hostname == "huggingface.co" and len(parts) > 5 and parts[3] == "resolve":
+        parts[4] = commit
+        return parsed._replace(path="/".join(parts)).geturl()
+    return url
+
+
 def download(args, tokens, progress):
     url, suggested, token_name = parse_model_url(args.url)
     folder = safe_folder(args.folder)
@@ -332,9 +352,10 @@ def download(args, tokens, progress):
     local_dir = inside(models, folder)
     local_dir.mkdir(parents=True, exist_ok=True)
     partial = local_dir / (".comfy-" + secrets.token_hex(8) + ".part")
+    seen = {}
     try:
         try:
-            response = open_download(url, tokens.get(token_name, ""))
+            response = open_download(url, tokens.get(token_name, ""), seen)
         except HTTPError as error:
             hint = t("hint_auth", token=token_name) if error.code in {401, 403} and not tokens.get(token_name) else ""
             raise Failure(t("http_error", status=error.code, hint=hint)) from None
@@ -366,6 +387,10 @@ def download(args, tokens, progress):
     finally:
         partial.unlink(missing_ok=True)
     relative = f"{folder}/{name}"
+    if args.ledger:
+        import model_sources  # 同じフォルダーにある
+        model_sources.Ledger(args.ledger, Path(args.state or args.models) / "ledger.lock").record(
+            relative, pinned_url(url, seen.get("commit", "")), args.url.strip(), digest.hexdigest(), target.stat().st_size)
     if args.to_drive:
         drive_dir = inside(drive_models, folder)
         drive_dir.mkdir(parents=True, exist_ok=True)
@@ -384,6 +409,7 @@ def main():
     parser.add_argument("--folder", default="")
     parser.add_argument("--filename", default="")
     parser.add_argument("--to-drive", action="store_true")
+    parser.add_argument("--ledger", default="")
     parser.add_argument("--tokens-file", default="")
     parser.add_argument("--tokens-stdin", action="store_true")
     parser.add_argument("--progress-file", default="")
