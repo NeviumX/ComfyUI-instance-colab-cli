@@ -67,11 +67,15 @@ While the runtime runs, you can download models from Hugging Face and Civitai to
 
 For Hugging Face, copy the URL of the file page from your browser. For Civitai, copy the URL of the model page with a version selected.
 
-Choose where to save:
+In ComfyUI, choose one of three places to save:
 
-- **The runtime only:** gone when the runtime is deleted, but it is recorded in the ledger and stays in the model lists on the next runtime.
+- **The runtime only:** only downloaded to the runtime. It is not recorded in the ledger, so it leaves the lists when the runtime is deleted.
+- **The runtime only, recorded in the ledger:** gone when the runtime is deleted, but it is recorded in the ledger and stays in the model lists on the next runtime.
   When a node uses it, it is downloaded again from the recorded source.
-- **Google Drive too:** downloaded to the runtime first, then copied to Drive. ComfyUI can use it as soon as it is on the runtime.
+- **The runtime and Google Drive:** downloaded to the runtime and recorded in the ledger, then copied to Drive in the background.
+  ComfyUI can use it as soon as it is on the runtime. The bottom right of the page shows the copy and when it is done.
+
+`model-download.bat` offers two choices that are both recorded in the ledger: the runtime only, or Google Drive too. The copy to Drive finishes before the window closes.
 
 When the download is done, press R in ComfyUI to see the model in the lists. A file with the same name is never overwritten.
 
@@ -86,7 +90,7 @@ Each token is sent only to its own site.
 
 ### The model ledger
 
-Models downloaded with this tool are recorded in a ledger with where they are saved and where they came from.
+Models downloaded with this tool are recorded in a ledger with where they are saved and where they came from, unless "The runtime only" is chosen.
 Hugging Face models are recorded with the commit they were downloaded from, so the same content can be downloaded again later.
 
 - With Google Drive, the ledger is `My Drive/ComfyUI-Colab/model-sources.json`. Without it, the ledger is `model-sources.json` in this folder.
@@ -143,7 +147,7 @@ If the ledger has a model with the same name but a different size from the one o
 
 Models downloaded by ComfyUI-Manager and similar tools are saved on the runtime first and copied to Drive automatically once they are complete, so the next runtime can use them.
 
-### Setting up the Drive API
+### Setting up the Drive API (Optional)
 
 With the Drive API, models on Drive are downloaded in parallel. Make an OAuth client in your own Google Cloud project and authorize it once.
 Everything works without it too. Models on Drive are then copied one part after another.

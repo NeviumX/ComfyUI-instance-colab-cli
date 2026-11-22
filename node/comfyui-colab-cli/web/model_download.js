@@ -16,9 +16,10 @@ const TEXTS = {
     url: "URL",
     filename: "ファイル名 空のままなら URL やサイトの名前を使います",
     where: "保存する場所",
-    runtime: "ランタイムだけ ランタイムを削除すると消えますが、次回もモデルの一覧に出て、使うときにダウンロードし直します",
-    drive: "Googleドライブにも残す ランタイムに落としてからドライブにコピーします",
-    noDrive: "Googleドライブがマウントされていないので、ランタイムにだけ保存できます。",
+    runtime: "ランタイムのみ",
+    ledger: "ランタイムのみで台帳に記録",
+    drive: "ランタイムとGoogleドライブ",
+    noDrive: "Googleドライブがマウントされていないので、ドライブには保存できません。",
     start: "ダウンロード",
     cancelDownload: "中止",
     close: "閉じる",
@@ -46,9 +47,10 @@ const TEXTS = {
     url: "URL",
     filename: "File name. Leave empty to use the name from the URL or the site",
     where: "Save to",
-    runtime: "The runtime only. Gone when the runtime is deleted, but it stays in the model lists and is downloaded again when used",
-    drive: "Google Drive too. Downloaded to the runtime first, then copied to Drive",
-    noDrive: "Google Drive is not mounted, so the model can be saved on the runtime only.",
+    runtime: "The runtime only",
+    ledger: "The runtime only, recorded in the ledger",
+    drive: "The runtime and Google Drive",
+    noDrive: "Google Drive is not mounted, so the model cannot be saved there.",
     start: "Download",
     cancelDownload: "Cancel",
     close: "Close",
@@ -159,7 +161,9 @@ function mount(settings) {
     return radio;
   };
   const toRuntime = choice("runtime", text.runtime);
+  const toLedger = choice("ledger", text.ledger);
   const toDrive = choice("drive", text.drive);
+  const choices = [toRuntime, toLedger, toDrive];
   const ledger = add(dialog, "details");
   const ledgerTitle = add(ledger, "summary", text.ledger);
   add(ledger, "p", text.ledgerExplain);
@@ -197,7 +201,7 @@ function mount(settings) {
   let timer = null;
   let downloading = false;  // 進んでいる途中なら、閉じても結果を残して続きを見られるようにする
   const setRunning = (running) => {
-    for (const input of [folder, url, filename, toRuntime, toDrive, start]) input.disabled = running;
+    for (const input of [folder, url, filename, ...choices, start]) input.disabled = running;
     if (!running && toDrive.dataset.unavailable) toDrive.disabled = true;
     cancel.hidden = !running;
   };
@@ -249,11 +253,11 @@ function mount(settings) {
       if (listing.drive) {
         delete toDrive.dataset.unavailable;
         toDrive.disabled = false;
-        if (!toRuntime.checked && !toDrive.checked) toDrive.checked = true;
+        if (!choices.some((choice) => choice.checked)) toDrive.checked = true;
       } else {
         toDrive.dataset.unavailable = "1";
         toDrive.disabled = true;
-        toRuntime.checked = true;
+        if (!toRuntime.checked) toLedger.checked = true;
       }
       status.textContent = listing.drive ? "" : text.noDrive;
     } catch (error) {
@@ -304,7 +308,7 @@ function mount(settings) {
       const answer = await api.fetchApi("/colab_cli/models/download", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: url.value.trim(), folder: folder.value, filename: filename.value.trim(),
-                               to_drive: toDrive.checked }),
+                               where: (choices.find((choice) => choice.checked) || toLedger).value }),
       });
       if (answer.status === 409) throw new Error(text.busy);
       if (!answer.ok) throw new Error(text.failedToStart);

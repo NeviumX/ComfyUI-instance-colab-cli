@@ -13,6 +13,8 @@ const TEXTS = {
     failed: "モデルを取得できませんでした",
     cancelled: "取得を中止しました",
     backed_up: "Google ドライブにコピーしました",
+    to_drive: "Google ドライブへコピー中",
+    backup_failed: "Google ドライブにコピーできませんでした",
   },
   en: {
     url: "Downloading from the original URL",
@@ -23,6 +25,8 @@ const TEXTS = {
     failed: "Could not get the model",
     cancelled: "Stopped getting the model",
     backed_up: "Copied to Google Drive",
+    to_drive: "Copying to Google Drive",
+    backup_failed: "Could not copy it to Google Drive",
   },
 };
 
@@ -120,7 +124,7 @@ function mount(lang) {
     entry.bar.hidden = data.state !== "done";
     if (data.state === "done") { entry.bar.max = 1; entry.bar.value = 1; }
     entry.detail.textContent = data.state === "done" || data.state === "backed_up" ? "" : (data.message || "");
-    closeLater(data.name, entry, data.state === "failed" || data.state === "fallback" ? 15 : 5);
+    closeLater(data.name, entry, ["failed", "fallback", "backup_failed"].includes(data.state) ? 15 : 5);
   });
 }
 

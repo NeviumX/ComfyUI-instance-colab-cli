@@ -4,10 +4,12 @@ ComfyUI の画面からはノードがこのファイルを別のプロセスで
 
     python3 model_download.py folders --models DIR [--drive-models DIR]
     python3 model_download.py download --models DIR [--drive-models DIR] --state DIR
-                                       --url URL --folder NAME [--filename NAME] [--to-drive] [--ledger FILE]
+                                       --url URL --folder NAME [--filename NAME] [--to-drive | --drive-later]
+                                       [--ledger FILE]
                                        [--tokens-file FILE | --tokens-stdin] [--progress-file FILE] [--bar]
 
 ランタイムの models に .part として書き、書き終えてから正しい名前にする。SHA256 は計算して表示する。--to-drive なら、続けて Google ドライブにもコピーする。
+--drive-later は、ドライブに置けるかだけを確かめてコピーはしない。ComfyUI のノードが、ダウンロードの後にバックグラウンドでコピーする。
 ランタイムのディスクに先に書くので、ComfyUI ではすぐに使える。ドライブへの書き込みは遅いことがあるため、この順にしている。
 --ledger があれば、保存先とダウンロード元を台帳に記録する。台帳にあるモデルは、次のランタイムでも ComfyUI の一覧に出る。
 """
@@ -56,6 +58,7 @@ TEXTS = {
         "copying": "ドライブへコピー中",
         "saved_runtime": "ランタイムに保存しました: {path}",
         "saved_drive": "ランタイムと Google ドライブに保存しました: {path}",
+        "saved_drive_later": "ランタイムに保存しました: {path}。Google ドライブへはバックグラウンドでコピーし、終わると右下に表示します。",
         "refresh": "ComfyUI の画面で R キーを押すと、モデルの一覧に出ます。",
     },
     "en": {
@@ -83,6 +86,7 @@ TEXTS = {
         "copying": "Copying to Drive",
         "saved_runtime": "Saved on the runtime: {path}",
         "saved_drive": "Saved on the runtime and on Google Drive: {path}",
+        "saved_drive_later": "Saved on the runtime: {path}. It is copied to Google Drive in the background, and the bottom right says when it is done.",
         "refresh": "Press R in ComfyUI to see it in the model lists.",
     },
 }
@@ -254,6 +258,7 @@ class Progress:
         self.path, self.bar, self.name = path, bar, name
         self.started = self.last = time.monotonic()
         self.phase, self.done, self.total = "download", 0, 0
+        self.saved = ""
 
     def write(self, state, message="", force=False):
         now = time.monotonic()
@@ -264,6 +269,8 @@ class Progress:
         if self.path:
             data = {"state": state, "phase": self.phase, "name": self.name, "received": self.done,
                     "total": self.total, "speed": speed, "message": message}
+            if state == "done" and self.saved:
+                data["path"] = self.saved  # models から見た保存先。ノードがドライブへのコピーに使う
             temporary = self.path.with_suffix(".tmp")
             temporary.write_text(json.dumps(data))
             os.replace(temporary, self.path)
@@ -339,11 +346,12 @@ def download(args, tokens, progress):
     name = safe_filename(given) if given else ""
     models = Path(args.models)
     drive_models = Path(args.drive_models) if args.drive_models else None
-    if args.to_drive and not (drive_models and drive_models.parent.is_dir()):
+    to_drive = args.to_drive or args.drive_later
+    if to_drive and not (drive_models and drive_models.parent.is_dir()):
         raise Failure(t("no_drive"))
 
     def check_free(target_name):
-        for root in [models] + ([drive_models] if args.to_drive else []):
+        for root in [models] + ([drive_models] if to_drive else []):
             if (root / folder / target_name).exists():
                 raise Failure(t("exists", path=f"{folder}/{target_name}"))
 
@@ -387,6 +395,7 @@ def download(args, tokens, progress):
     finally:
         partial.unlink(missing_ok=True)
     relative = f"{folder}/{name}"
+    progress.saved = relative
     if args.ledger:
         import model_sources  # 同じフォルダーにある
         model_sources.Ledger(args.ledger, Path(args.state or args.models) / "ledger.lock").record(
@@ -396,6 +405,8 @@ def download(args, tokens, progress):
         drive_dir.mkdir(parents=True, exist_ok=True)
         copy_with_progress(target, drive_dir / name, progress)
         return t("saved_drive", path=relative) + " SHA256: " + digest.hexdigest()
+    if args.drive_later:
+        return t("saved_drive_later", path=relative) + " SHA256: " + digest.hexdigest()
     return t("saved_runtime", path=relative) + " SHA256: " + digest.hexdigest()
 
 
@@ -409,6 +420,7 @@ def main():
     parser.add_argument("--folder", default="")
     parser.add_argument("--filename", default="")
     parser.add_argument("--to-drive", action="store_true")
+    parser.add_argument("--drive-later", action="store_true")
     parser.add_argument("--ledger", default="")
     parser.add_argument("--tokens-file", default="")
     parser.add_argument("--tokens-stdin", action="store_true")

@@ -50,6 +50,9 @@ TEXTS = {
         "drive_not_found": "Drive API でファイルが見つかりません。",
         "range": "Drive API が範囲を指定した読み込みに応じませんでした。",
         "backed_up": "Google ドライブにもコピーしました: {name}",
+        "source_to_drive": "Google ドライブへコピー",
+        "backup_failed": "Google ドライブにコピーできませんでした: {name}。{reason}",
+        "drive_exists": "ドライブに同じ名前のファイルがあります。",
     },
     "en": {
         "source_url": "Downloading from the original URL",
@@ -65,6 +68,9 @@ TEXTS = {
         "drive_not_found": "The Drive API cannot find the file.",
         "range": "The Drive API did not answer a ranged read.",
         "backed_up": "Also copied to Google Drive: {name}",
+        "source_to_drive": "Copying to Google Drive",
+        "backup_failed": "Could not copy {name} to Google Drive. {reason}",
+        "drive_exists": "A file with the same name is already on Drive.",
     },
 }
 
@@ -550,12 +556,18 @@ def backup_candidates(runtime, drive, known, since):
     return found
 
 
-def copy_to_drive(path, target):
+def copy_to_drive(path, target, report=None):
+    """ランタイムのモデルをドライブに写す。report があれば、進み具合を右下の通知に送る。"""
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(".comfy-" + secrets.token_hex(8) + ".part")
     try:
+        if report:
+            report.start("to_drive", path.stat().st_size)
         with path.open("rb") as source, temporary.open("wb") as sink:
-            shutil.copyfileobj(source, sink, 16 * 1024 * 1024)
+            for chunk in iter(lambda: source.read(16 * 1024 * 1024), b""):
+                sink.write(chunk)
+                if report:
+                    report.advance(len(chunk))
         if target.exists():
             return False
         os.replace(temporary, target)

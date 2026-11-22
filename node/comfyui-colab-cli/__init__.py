@@ -107,9 +107,48 @@ def _downloader_args(command):
     drive_models = os.environ.get("COMFY_COLAB_CLI_DRIVE_MODELS", "")
     if drive_models:
         args += ["--drive-models", drive_models]
-    if command == "download" and os.environ.get("COMFY_COLAB_CLI_LEDGER"):
-        args += ["--ledger", os.environ["COMFY_COLAB_CLI_LEDGER"]]
     return args
+
+
+# 保存先の選択肢。runtime はランタイムだけで台帳に記録しない。ledger はランタイムに置いて台帳に記録する。
+# drive は台帳に記録し、ダウンロードが終わってからバックグラウンドでドライブにコピーする。
+WHERE = {"runtime", "ledger", "drive"}
+RUNTIME_ONLY = set()  # ランタイムだけと選ばれたモデル。ドライブへの自動のコピーから外す
+
+
+def _drive_copy(key):
+    """ダウンロードが終わったモデルを、ドライブへ写す。別のスレッドで動かす。"""
+    if str(STAGE) not in sys.path:
+        sys.path.insert(0, str(STAGE))
+    import model_sources
+    report = model_sources.Report(_notify, key)
+    try:
+        if model_sources.copy_to_drive(Path(RUNTIME_MODELS) / key, Path(DRIVE_MODELS) / key, report):
+            print(f"[comfyui-colab-cli] copied to Google Drive: {key}", flush=True)
+            _notify({"state": "backed_up", "name": key, "message": model_sources.t("backed_up", name=key)})
+        else:
+            reason = model_sources.t("drive_exists")
+            _notify({"state": "backup_failed", "name": key, "message": model_sources.t("backup_failed", name=key, reason=reason)})
+    except Exception as error:
+        print(f"[comfyui-colab-cli] Drive copy: {type(error).__name__}: {error}", flush=True)
+        _notify({"state": "backup_failed", "name": key,
+                 "message": model_sources.t("backup_failed", name=key, reason=f"{type(error).__name__}: {error}")})
+
+
+async def _after_download(process, where):
+    """ダウンロードの終わりを待ち、選ばれた保存先に合わせて後の処理をする。"""
+    await process.wait()
+    try:
+        progress = json.loads(DOWNLOAD_PROGRESS.read_text())
+    except (OSError, ValueError):
+        return
+    key = progress.get("path", "")
+    if progress.get("state") != "done" or not key:
+        return
+    if where == "runtime":
+        RUNTIME_ONLY.add(key)
+    elif where == "drive" and DRIVE_MODELS:
+        threading.Thread(target=_drive_copy, args=(key,), name="colab-cli-drive-copy-now", daemon=True).start()
 
 
 async def _json_body(request):
@@ -151,10 +190,18 @@ async def colab_cli_model_download(request):
         "--progress-file", str(DOWNLOAD_PROGRESS),
         "--url", str(body.get("url", "")), "--folder", str(body.get("folder", "")),
         "--filename", str(body.get("filename", ""))]
-    if body.get("to_drive") is True:
-        args.append("--to-drive")
-    DOWNLOAD_JOB["process"] = await asyncio.create_subprocess_exec(
+    where = body.get("where")
+    if where not in WHERE:
+        # 前の画面は to_drive だけを送る
+        where = "drive" if body.get("to_drive") is True else "ledger"
+    if where != "runtime" and os.environ.get("COMFY_COLAB_CLI_LEDGER"):
+        args += ["--ledger", os.environ["COMFY_COLAB_CLI_LEDGER"]]
+    if where == "drive":
+        args.append("--drive-later")
+    process = await asyncio.create_subprocess_exec(
         *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    DOWNLOAD_JOB["process"] = process
+    DOWNLOAD_JOB["after"] = asyncio.ensure_future(_after_download(process, where))
     return _answer({"state": "running"})
 
 
@@ -319,7 +366,7 @@ def _install_model_hooks():
 
 def _backup_loop():
     """ComfyUI-Manager などがランタイムに入れたモデルを、あとからドライブにも写す。
-    台帳にあるものは、ランタイムだけと選ばれたものか、元の URL から取ってきた写しなので写さない。"""
+    台帳にあるものと、このツールでランタイムだけと選ばれたものは写さない。"""
     import model_sources
     started = time.time()
     seen = {}
@@ -329,13 +376,13 @@ def _backup_loop():
         try:
             if not (drive.parent.is_dir() and runtime.is_dir()):
                 continue
-            known = set(LEDGER.all()) if LEDGER else set()
+            known = (set(LEDGER.all()) if LEDGER else set()) | RUNTIME_ONLY
             for key, path, size, mtime in model_sources.backup_candidates(runtime, drive, known, started):
                 # 書き終わったものだけを写す。続けて 2 回、同じ大きさと時刻だったら書き終わったとみなす
                 if seen.get(key) != (size, mtime) or time.time() - mtime < 60:
                     seen[key] = (size, mtime)
                     continue
-                if model_sources.copy_to_drive(path, drive / key):
+                if model_sources.copy_to_drive(path, drive / key, model_sources.Report(_notify, key)):
                     print(f"[comfyui-colab-cli] copied to Google Drive: {key}", flush=True)
                     _notify({"state": "backed_up", "name": key, "message": model_sources.t("backed_up", name=key)})
                 seen.pop(key, None)
