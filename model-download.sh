@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 動いているランタイムに、Hugging Face か Civitai のモデルをダウンロードする。
-# 保存先のフォルダーを番号で選び、URL を貼り付け、ランタイムだけか Google ドライブにも残すかを選ぶ。
+# 保存先のフォルダーを番号で選び、URL を貼り付け、保存する場所を選ぶ。
+#   1) ランタイムのみ: 台帳に記録しない  2) ランタイムのみで台帳に記録  3) ランタイムとGoogleドライブ: 台帳に記録してドライブにも写す
+# 3 のドライブへのコピーは、ダウンロードに続けてこのウィンドウで進み具合を出しながら行う。
 #   ./model-download.sh
 # 成功したら 0 で終わる。model-download.bat は、失敗したときだけウィンドウを残す。
 source "$(dirname "$0")/lib/common.sh"
@@ -51,14 +53,25 @@ done
 read -r -u 3 -p "$(msg md_filename)" filename || exit 1
 
 # ---- 保存する場所 ----
-to_drive=""
-if [[ "$DRIVE_READY" == 1 ]]; then
-    msg md_where; echo
-    read -r -u 3 -p "$(msg md_where_prompt)" where || exit 1
-    [[ "${where:-2}" == 1 ]] || to_drive="--to-drive"
-else
+echo
+msg md_where; echo
+last=3
+if [[ "$DRIVE_READY" != 1 ]]; then
     log "$(msg md_no_drive)"
+    last=2
 fi
+while true; do
+    read -r -u 3 -p "$(msg md_where_prompt "$last")" where || exit 1
+    where="${where:-$last}"
+    [[ "$where" =~ ^[1-9]$ ]] && (( where <= last )) && break
+    warn "$(msg md_bad_number)"
+done
+ledger_arg=""
+if (( where >= 2 )); then
+    ledger_arg="--ledger \"\$(cat $(printf '%q' "$STAGE_DIR/state/ledger-path") 2>/dev/null)\""
+fi
+to_drive=""
+(( where == 3 )) && to_drive="--to-drive"
 
 # ---- ダウンロード ----
 echo
@@ -67,8 +80,7 @@ log "$(msg md_starting "$folder")"
 code=0
 tokens_json | rssh "MSG_LANG=$MSG_LANG $runner download $models_arg --state $(printf '%q' "$STAGE_DIR/state") \
     --url $(printf '%q' "$url") --folder $(printf '%q' "$folder") --filename $(printf '%q' "$filename") \
-    --ledger \"\$(cat $(printf '%q' "$STAGE_DIR/state/ledger-path") 2>/dev/null)\" \
-    $to_drive --tokens-stdin --bar" || code=$?
+    $ledger_arg $to_drive --tokens-stdin --bar" || code=$?
 if [[ "$code" != 0 ]]; then
     die "$(msg md_failed)"
 fi

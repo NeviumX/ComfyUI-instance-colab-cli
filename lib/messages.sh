@@ -151,14 +151,14 @@ _m md_filename \
     "ファイル名。空のままなら URL やサイトの名前を使います: " \
     "File name. Leave empty to use the name from the URL or the site: "
 _m md_where \
-    "保存する場所:\n  1) ランタイムだけ。ランタイムを削除すると消えますが、次回もモデルの一覧に出て、使うときにダウンロードし直します\n  2) Google ドライブにも残す。ランタイムに落としてから、ドライブにコピーします" \
-    "Save to:\n  1) The runtime only. Gone when the runtime is deleted, but it stays in the model lists and is downloaded again when used\n  2) Google Drive too. Downloaded to the runtime first, then copied to Drive"
+    "保存する場所:\n  1) ランタイムのみ\n  2) ランタイムのみで台帳に記録\n  3) ランタイムとGoogleドライブ" \
+    "Save to:\n  1) The runtime only\n  2) The runtime only, recorded in the ledger\n  3) The runtime and Google Drive"
 _m md_where_prompt \
-    "1 か 2 を選んでください。Enter だけなら 2: " \
-    "Pick 1 or 2. Enter alone picks 2: "
+    "番号を選んでください。Enter だけなら %s: " \
+    "Pick a number. Enter alone picks %s: "
 _m md_no_drive \
-    "Google ドライブがマウントされていないので、ランタイムにだけ保存します。" \
-    "Google Drive is not mounted, so the model is saved on the runtime only."
+    "Google ドライブがマウントされていないので、3 は選べません。" \
+    "Google Drive is not mounted, so 3 cannot be picked."
 _m md_starting \
     "%s にダウンロードします。" \
     "Downloading into %s."

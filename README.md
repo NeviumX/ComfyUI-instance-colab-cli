@@ -67,15 +67,14 @@ While the runtime runs, you can download models from Hugging Face and Civitai to
 
 For Hugging Face, copy the URL of the file page from your browser. For Civitai, copy the URL of the model page with a version selected.
 
-In ComfyUI, choose one of three places to save:
+Choose one of three places to save:
 
 - **The runtime only:** only downloaded to the runtime. It is not recorded in the ledger, so it leaves the lists when the runtime is deleted.
 - **The runtime only, recorded in the ledger:** gone when the runtime is deleted, but it is recorded in the ledger and stays in the model lists on the next runtime.
   When a node uses it, it is downloaded again from the recorded source.
 - **The runtime and Google Drive:** downloaded to the runtime and recorded in the ledger, then copied to Drive in the background.
   ComfyUI can use it as soon as it is on the runtime. The bottom right of the page shows the copy and when it is done.
-
-`model-download.bat` offers two choices that are both recorded in the ledger: the runtime only, or Google Drive too. The copy to Drive finishes before the window closes.
+  `model-download.bat` copies it right after the download in the same window, and the window closes once the copy is done.
 
 When the download is done, press R in ComfyUI to see the model in the lists. A file with the same name is never overwritten.
 
