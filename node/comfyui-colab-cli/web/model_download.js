@@ -16,9 +16,9 @@ const TEXTS = {
     url: "URL",
     filename: "ファイル名 空のままなら URL やサイトの名前を使います",
     where: "保存する場所",
-    runtime: "ランタイムのみ",
-    ledger: "ランタイムのみで台帳に記録",
-    drive: "ランタイムとGoogleドライブ",
+    whereRuntime: "ランタイムのみ",
+    whereLedger: "ランタイムと台帳に記録",
+    whereDrive: "ランタイムとGoogleドライブ",
     noDrive: "Googleドライブがマウントされていないので、ドライブには保存できません。",
     start: "ダウンロード",
     cancelDownload: "中止",
@@ -47,9 +47,9 @@ const TEXTS = {
     url: "URL",
     filename: "File name. Leave empty to use the name from the URL or the site",
     where: "Save to",
-    runtime: "The runtime only",
-    ledger: "The runtime only, recorded in the ledger",
-    drive: "The runtime and Google Drive",
+    whereRuntime: "The runtime only",
+    whereLedger: "The runtime, recorded in the ledger",
+    whereDrive: "The runtime and Google Drive",
     noDrive: "Google Drive is not mounted, so the model cannot be saved there.",
     start: "Download",
     cancelDownload: "Cancel",
@@ -160,9 +160,9 @@ function mount(settings) {
     wrapper.append(radio, document.createTextNode(label));
     return radio;
   };
-  const toRuntime = choice("runtime", text.runtime);
-  const toLedger = choice("ledger", text.ledger);
-  const toDrive = choice("drive", text.drive);
+  const toRuntime = choice("runtime", text.whereRuntime);
+  const toLedger = choice("ledger", text.whereLedger);
+  const toDrive = choice("drive", text.whereDrive);
   const choices = [toRuntime, toLedger, toDrive];
   const ledger = add(dialog, "details");
   const ledgerTitle = add(ledger, "summary", text.ledger);

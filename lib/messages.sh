@@ -151,8 +151,8 @@ _m md_filename \
     "ファイル名。空のままなら URL やサイトの名前を使います: " \
     "File name. Leave empty to use the name from the URL or the site: "
 _m md_where \
-    "保存する場所:\n  1) ランタイムのみ\n  2) ランタイムのみで台帳に記録\n  3) ランタイムとGoogleドライブ" \
-    "Save to:\n  1) The runtime only\n  2) The runtime only, recorded in the ledger\n  3) The runtime and Google Drive"
+    "保存する場所:\n  1) ランタイムのみ\n  2) ランタイムと台帳に記録\n  3) ランタイムとGoogleドライブ" \
+    "Save to:\n  1) The runtime only\n  2) The runtime, recorded in the ledger\n  3) The runtime and Google Drive"
 _m md_where_prompt \
     "番号を選んでください。Enter だけなら %s: " \
     "Pick a number. Enter alone picks %s: "

@@ -80,7 +80,7 @@ echo
 log "$(msg md_starting "$folder")"
 # トークンは標準入力で渡す。進み具合のバーは ssh 越しに 1 行で書き換わる
 code=0
-tokens_json | rssh "MSG_LANG=$MSG_LANG $runner download $models_arg --state $(printf '%q' "$STAGE_DIR/state") \
+tokens_json | rssh "export MSG_LANG=$MSG_LANG; $runner download $models_arg --state $(printf '%q' "$STAGE_DIR/state") \
     --url $(printf '%q' "$url") --folder $(printf '%q' "$folder") --filename $(printf '%q' "$filename") \
     $ledger_arg $to_drive --tokens-stdin --bar" || code=$?
 if [[ "$code" != 0 ]]; then

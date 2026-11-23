@@ -71,7 +71,7 @@ For Hugging Face, copy the URL of the file page from your browser. For Civitai, 
 Choose one of three places to save:
 
 - **The runtime only:** only downloaded to the runtime. It is not recorded in the ledger, so it leaves the lists when the runtime is deleted.
-- **The runtime only, recorded in the ledger:** gone when the runtime is deleted, but it is recorded in the ledger and stays in the model lists on the next runtime.
+- **The runtime, recorded in the ledger:** gone when the runtime is deleted, but it is recorded in the ledger and stays in the model lists on the next runtime.
   When a node uses it, it is downloaded again from the recorded source.
 - **The runtime and Google Drive:** downloaded to the runtime and recorded in the ledger, then copied to Drive in the background.
   ComfyUI can use it as soon as it is on the runtime. The bottom right of the page shows the copy and when it is done.
