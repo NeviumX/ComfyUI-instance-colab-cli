@@ -129,7 +129,6 @@ function mount(settings) {
     link.href = REPOSITORY_URL;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    link.title = text.repository;
     link.setAttribute("aria-label", text.repository);
     const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     for (const [name, value] of [["viewBox", "0 0 16 16"], ["width", "20"], ["height", "20"], ["fill", "currentColor"], ["aria-hidden", "true"]]) {

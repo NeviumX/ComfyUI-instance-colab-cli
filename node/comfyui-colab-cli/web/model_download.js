@@ -11,7 +11,7 @@ const TEXTS = {
     button: "モデル",
     title: "モデルをダウンロード",
     repository: "GitHub のリポジトリ",
-    explain: "Hugging Face のファイルのページかCivitai のモデルのページの URL を貼り付けてください。",
+    explain: "Hugging Face のファイルのページか Civitai のモデルのページの URL を貼り付けてください。",
     folder: "保存先のフォルダー",
     url: "URL",
     filename: "ファイル名 空のままなら URL やサイトの名前を使います",
@@ -181,7 +181,6 @@ function mount(settings) {
   link.href = REPOSITORY_URL;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
-  link.title = text.repository;
   link.setAttribute("aria-label", text.repository);
   const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   for (const [name, value] of [["viewBox", "0 0 16 16"], ["width", "20"], ["height", "20"], ["fill", "currentColor"], ["aria-hidden", "true"]]) {

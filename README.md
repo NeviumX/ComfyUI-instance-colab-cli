@@ -49,10 +49,14 @@ Turn on **Auto-download outputs** in the connection settings to save generated i
 
 The Stop button at the top right of ComfyUI offers two choices.
 
+<img src="imgs/toolbar_buttons_en.png" alt="The Models and Stop buttons at the top right of ComfyUI" width="138">
+
 - **Disconnect and delete the runtime**: copies the outputs to the local `outputs` folder, then deletes the runtime. Billing stops.
 - **Disconnect only**: closes only the tunnel. The runtime and ComfyUI keep running and keep being billed. Reconnect with `start.bat`.
 
 The `start.bat` window carries out the choice, so keep it open while you use ComfyUI.
+
+<img src="imgs/stop_dialog_en.png" alt="The Stop dialog" width="448">
 
 **Download the outputs as a ZIP** in the same dialog packs the outputs on Colab into one ZIP file and hands it to your browser as a download.
 With many outputs, it takes a while to arrive.
@@ -77,7 +81,7 @@ Choose one of three places to save:
   ComfyUI can use it as soon as it is on the runtime. The bottom right of the page shows the copy and when it is done.
   `model-download.bat` copies it right after the download in the same window, and the window closes once the copy is done.
 
-When the download is done, press R in ComfyUI to see the model in the lists. A file with the same name is never overwritten.
+<img src="imgs/model_download_en.png" alt="The model download dialog" width="544">
 
 For models that need authentication, put your tokens in `config.local.env`, then start with `start.bat`.
 
