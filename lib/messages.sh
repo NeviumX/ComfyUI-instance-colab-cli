@@ -79,8 +79,8 @@ _m drive_already \
     "Google ドライブはマウント済みです。" \
     "Google Drive is already mounted."
 _m drive_mounting \
-    "Google ドライブをマウントします。開いたブラウザで許可し、このウィンドウで Enter を押してください。Colab は 2 分ほどしか待たないので、早めに済ませてください。" \
-    "Mounting Google Drive. Allow access in the browser that opens, then press Enter in this window. Colab waits only about 2 minutes, so do it soon."
+    "Google ドライブをマウントします。開いたブラウザで許可し、このウィンドウで Enter を押してください。2分以内に完了させてください。" \
+    "Mounting Google Drive. Allow access in the browser that opens, then press Enter in this window. Complete within 2 minutes."
 _m drive_ready \
     "Google ドライブの %s のモデルを使います。" \
     "Using the models in %s on Google Drive."
@@ -88,7 +88,7 @@ _m drive_failed \
     "Google ドライブをマウントできませんでした。モデルは Colab VM の中だけに置かれ、ランタイムの削除で消えます。" \
     "Could not mount Google Drive. Models stay only on the Colab VM and are deleted with the runtime."
 _m drive_flushing \
-    "Google ドライブへの書き込みを完了させて、アンマウントします。" \
+    "Google ドライブへの書き込みを完了させてアンマウントします。" \
     "Finishing writes to Google Drive and unmounting it."
 _m drive_flushed \
     "Google ドライブをアンマウントしました。" \
@@ -108,8 +108,8 @@ _m env_delete_anyway \
     "保存せずにランタイムを削除しますか？ 前回の保存より後の変更は失われます。 [y/N] " \
     "Delete the runtime without saving? Changes since the last save are lost. [y/N] "
 _m not_deleted \
-    "ランタイムは削除していません。課金は続いています。原因を直してから、もう一度削除してください。" \
-    "The runtime was not deleted and is still being billed. Fix the cause, then delete it again."
+    "ランタイムは削除していません。課金は続いています。原因を直してからもう一度削除してください。" \
+    "The runtime was not deleted and is still being billed. Fix the cause then delete it again."
 
 # ===== update.sh =====
 _m updating \
@@ -482,6 +482,27 @@ _m r_save_failed \
 _m r_ledger_merge_failed \
     "手元から送ったモデルの台帳を合わせられませんでした。起動は続けます。" \
     "Could not merge the model ledger sent from here. Continuing startup."
+_m r_lock_without_torch \
+    "保存した環境のパッケージの記録に PyTorch がありません。準備が途中で止まったときの記録なので、使わずに入れ直します。" \
+    "The package record of the saved environment has no PyTorch. It was saved while the setup had stopped halfway, so the packages are installed again instead."
+_m r_isolated \
+    "ComfyUI とカスタムノードは、root ではない利用者 %s で動かします。Google ドライブは models だけを読み取り専用で見せます。" \
+    "ComfyUI and custom nodes run as %s, a user that is not root. Google Drive shows only models, read-only."
+_m r_not_root \
+    "root ではないので、ComfyUI を別の利用者に分けずに動かします。" \
+    "Not running as root, so ComfyUI runs without a separate user."
+_m r_drive_elsewhere \
+    "Google ドライブが %s にマウントされています。ComfyUI から読み書きできてしまうので起動しません。ランタイムを作り直してください。" \
+    "Google Drive is mounted at %s, where ComfyUI could read and write it, so ComfyUI is not started. Create the runtime again."
+_m r_private_owner \
+    "%s が root のフォルダーではありません。ランタイムを作り直してください。" \
+    "%s is not a folder of root. Create the runtime again."
+_m r_view_failed \
+    "Google ドライブの models を %s に読み取り専用で見せられませんでした。" \
+    "Could not show the models on Google Drive read-only at %s."
+_m r_helper_failed \
+    "モデルの仕事を受け持つ model_helper.py が起動しませんでした。ログ: %s" \
+    "model_helper.py, which does the model work, did not start. Log: %s"
 _m r_drive_models \
     "Google ドライブのモデルを ComfyUI に追加しました: %s" \
     "Added the models on Google Drive to ComfyUI: %s"

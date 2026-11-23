@@ -20,7 +20,8 @@ upload_files
 
 drive_arg=""
 [[ "$DRIVE_READY" == 1 ]] && drive_arg="--drive-models $(printf '%q' "$DRIVE_MODELS")"
-runner="$(printf '%q' "$COMFY_BASE/.venv/bin/python") $(printf '%q' "$STAGE_DIR/model_download.py")"
+# root で動かすので、ComfyUI の venv の Python ではなく、VM の Python を使う。venv はその利用者が書き換えられる
+runner="source $(printf '%q' "$STAGE_DIR/env.sh") && \"\$COMFY_PYTHON\" $(printf '%q' "$STAGE_DIR/model_download.py")"
 models_arg="--models $(printf '%q' "$COMFY_BASE/models") $drive_arg"
 
 # ---- 保存先のフォルダー ----
@@ -66,9 +67,10 @@ while true; do
     [[ "$where" =~ ^[1-9]$ ]] && (( where <= last )) && break
     warn "$(msg md_bad_number)"
 done
-ledger_arg=""
+# 2 と 3 は台帳に記録し、ComfyUI が読む写しも書き直す。1 はドライブへ自動で写さないものとして記録する
+ledger_arg="--runtime-only-file \"\$COMFY_RUNTIME_ONLY\""
 if (( where >= 2 )); then
-    ledger_arg="--ledger \"\$(cat $(printf '%q' "$STAGE_DIR/state/ledger-path") 2>/dev/null)\""
+    ledger_arg="--ledger \"\$COMFY_LEDGER\" --ledger-mirror \"\$COMFY_LEDGER_MIRROR\""
 fi
 to_drive=""
 (( where == 3 )) && to_drive="--to-drive"

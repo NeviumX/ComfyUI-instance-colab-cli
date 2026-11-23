@@ -9,9 +9,14 @@
     python3 comfy_env.py prepare      モデルなどのフォルダーを用意し、保存したデータベースを戻す
     python3 comfy_env.py lock         インストール済みのパッケージを requirements.lock.txt に書く
     python3 comfy_env.py update 版     ComfyUI を指定の版に更新する。latest なら最新のリリースタグ
+    python3 comfy_env.py app 操作 ...  作業場所の中の操作。ComfyUI の利用者として root から呼ばれる
 
 場所は環境変数で受け取る: COMFY_BASE, COMFY_STATE, COMFY_PYTHON, MSG_LANG と、
 Drive の保存先の COMFY_STORAGE。COMFY_STORAGE が空なら保存も復元もしない。
+
+root として動き、Drive と状態のファイルを扱う。作業場所 COMFY_BASE は ComfyUI の利用者のものなので、
+その中の操作は app_user.py でその利用者として行う。書庫づくり、展開、git、pip などがそれにあたる。
+root が作業場所のリンクをたどると、ドライブや鍵やシステムのファイルを書き換えさせられるため。
 """
 
 import fcntl
@@ -29,6 +34,8 @@ import tarfile
 import tempfile
 import time
 
+import app_user  # 同じフォルダーにある
+
 BASE = Path(os.environ.get("COMFY_BASE", "/content/comfy-session"))
 ENVDIR = BASE / "environment"
 REPO = ENVDIR / "ComfyUI"
@@ -45,6 +52,7 @@ GENERATION_NAME = re.compile(r"\d{8}T\d{6}Z-[a-f0-9]{12}\.json")
 WHOLE_ARCHIVE_NAME = re.compile(r"\d{8}T\d{6}Z-[a-f0-9]{12}\.tar\.gz")
 LOCK_LINE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*(==[A-Za-z0-9._+!-]+| @ (git\+)?https://\S+)")
 TORCH_INDEX = re.compile(r"https://download\.pytorch\.org/whl/cu\d+")
+ARCHIVE_LIMIT = 64 * 1024 ** 3  # 部品 1 つの書庫として受け取る大きさの上限
 MODEL_FOLDERS = ("checkpoints", "diffusion_models", "unet", "text_encoders", "clip", "clip_vision", "vae",
                  "loras", "controlnet", "upscale_models", "embeddings", "audio_encoders", "model_patches")
 
@@ -59,6 +67,8 @@ TEXTS = {
         "sha_mismatch": "保存した環境の部品 {name} の SHA256 が一覧と一致しません。復元を中止します。",
         "special_files": "保存した環境にリンクや特殊なファイルが含まれています。復元を中止します。",
         "unsafe_path": "保存した環境に、フォルダーの外を指すパスがあります: {path}",
+        "lock_without_torch": "ComfyUI の venv に PyTorch が入っていません。準備が途中で止まった環境なので、保存しません。",
+        "not_ready": "ComfyUI の準備が終わっていないので、環境は保存しません。",
         "unpinned_lock": "requirements.lock.txt に、版を固定していない行や、ローカルのパスを使う行があります。"
                          "次の VM で同じものを入れられないので保存しません: {line}",
         "busy": "保存している間に環境が変わりました。次の保存でやり直します。",
@@ -87,6 +97,8 @@ TEXTS = {
         "sha_mismatch": "The SHA256 of part {name} of the saved environment does not match its list. Restoring is aborted.",
         "special_files": "The saved environment contains links or special files. Restoring is aborted.",
         "unsafe_path": "The saved environment has a path that leads outside its folder: {path}",
+        "lock_without_torch": "PyTorch is not installed in the ComfyUI venv. The setup stopped halfway, so nothing is saved.",
+        "not_ready": "The setup of ComfyUI has not finished, so the environment is not saved.",
         "unpinned_lock": "requirements.lock.txt has a line without a pinned version or with a local path. "
                          "The next VM could not install the same, so nothing is saved: {line}",
         "busy": "The environment changed while it was being saved. The next save tries again.",
@@ -217,6 +229,11 @@ def component_fingerprints(root):
     return {name: hashlib.sha256(json.dumps(found).encode()).hexdigest() for name, found in entries.items()}
 
 
+def fingerprints():
+    """作業場所の部品ごとの指紋。その利用者として数える。"""
+    return json.loads(app_action("fingerprints"))
+
+
 def write_archive(component, sink):
     """部品を 1 つ tar.gz にする。圧縮した時刻を入れないので、同じファイルからは同じバイト列になる。"""
     def without_other_parts(member):
@@ -250,11 +267,71 @@ def restore_archive(archive, dest):
         tf.extractall(dest, filter="data")
 
 
+# ---- 作業場所の中の操作 ----
+# ComfyUI の利用者として動く。root は app_action で呼び、出力の大きさと時間に上限を付けて受け取る。
+
+PYTHON = os.environ.get("COMFY_PYTHON") or sys.executable
+READABLE = {"requirements.lock.txt", "runtime.json"}
+
+
+def tree_action(action, args, source, sink):
+    if action == "restore-archive":
+        fd, temporary = tempfile.mkstemp(prefix=".comfy-", suffix=".tar.gz", dir=BASE)
+        try:
+            with os.fdopen(fd, "wb") as file:
+                shutil.copyfileobj(source, file, 4 * 1024 * 1024)
+            restore_archive(temporary, ENVDIR)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    elif action == "prepare":
+        prepare_tree()
+    elif action == "fingerprints":
+        sink.write(json.dumps(component_fingerprints(ENVDIR)).encode())
+    elif action == "archive":
+        write_archive(args[0], sink)
+    elif action == "backup-database":
+        with sqlite3.connect(f"file:{DATABASE}?mode=ro", uri=True) as database:
+            with sqlite3.connect(REPO / "user/comfyui.db") as target:
+                database.backup(target)
+    elif action == "write-lock":
+        write_lock_here()
+    elif action == "read" and args and args[0] in READABLE:
+        sink.write(contained_path(ENVDIR, args[0]).read_bytes())
+    else:
+        raise ValueError(action)
+
+
+def app_action(action, *args, stdin=None, sink=None, limit=16 * 1024 ** 2, timeout=app_user.APP_TIMEOUT):
+    """tree_action をその利用者として行う。stdin はバイト列かファイル、sink は書き込み先のファイル。"""
+    args = list(map(str, args))
+    if not app_user.isolated():
+        import io
+        out = sink or io.BytesIO()
+        tree_action(action, args, io.BytesIO(stdin) if isinstance(stdin, bytes) else stdin, out)
+        return b"" if sink else out.getvalue()
+    here = Path(__file__).resolve()
+    extra = {"COMFY_BASE": str(BASE), "MSG_LANG": os.environ.get("MSG_LANG", ""), "COMFY_PYTHON": PYTHON}
+    return app_user.capture([PYTHON, str(here), "app", action, *args], cwd=str(here.parent), extra=extra,
+                            limit=limit, timeout=timeout, stdin=stdin, sink=sink)
+
+
+def read_env_file(name):
+    return app_action("read", name).decode("utf-8")
+
+
+def app_main(argv):
+    action = argv[0] if argv else ""
+    tree_action(action, argv[1:], sys.stdin.buffer, sys.stdout.buffer)
+    sys.stdout.buffer.flush()
+    return 0
+
+
 # ---- 保存 ----
 
 def python_version():
     """ComfyUI の venv の元になる Python の版。保存した環境は、同じ版の Python でだけ復元する。"""
-    py = os.environ.get("COMFY_PYTHON") or str(VENV_PY)
+    # venv の Python はその利用者が書き換えられるので、root では動かさない
+    py = os.environ.get("COMFY_PYTHON") or sys.executable
     out = subprocess.run([py, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
                          capture_output=True, text=True, check=True).stdout
     return out.strip()
@@ -270,15 +347,27 @@ def checked_lock(text):
 
 def saved_torch_index():
     """記録した PyTorch の取得元。PyTorch の公式の CUDA 版の索引だけを受け付ける。"""
-    index = json.loads((ENVDIR / "runtime.json").read_text()).get("torch_index_url", "")
+    index = json.loads(read_env_file("runtime.json")).get("torch_index_url", "")
     if not TORCH_INDEX.fullmatch(str(index)):
         raise RuntimeError("invalid torch index: " + str(index))
     return index
 
 
 def write_lock():
+    """インストール済みのパッケージを記録する。pip はその利用者として動かす。"""
+    app_action("write-lock")
+
+
+def has_torch(text):
+    return any(re.split(r"==| @ ", line)[0].strip().lower() == "torch" for line in text.splitlines())
+
+
+def write_lock_here():
     packages = checked_lock(subprocess.run([str(VENV_PY), "-m", "pip", "freeze"], capture_output=True, text=True,
                                            check=True, timeout=300).stdout)
+    # 準備が途中で止まった venv の記録を残すと、次の VM はそれを復元して何も入れずに起動しようとする
+    if not has_torch(packages):
+        raise RuntimeError(t("lock_without_torch"))
     lock = ENVDIR / "requirements.lock.txt"
     if not lock.exists() or lock.read_text() != packages:
         fd, temporary = tempfile.mkstemp(prefix=".comfy-", suffix=".part", dir=ENVDIR)
@@ -291,14 +380,12 @@ def backup_database(force):
     """ComfyUI のデータベースを ComfyUI/user/comfyui.db に写す。WAL の確定済みの変更も含めて一貫した写しになる。"""
     if not DATABASE.exists():
         return
-    signature = json.dumps([(p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in
-                            (DATABASE, DATABASE.with_name(DATABASE.name + "-wal")) if p.exists()])
+    signature = json.dumps([(p.name, p.lstat().st_size, p.lstat().st_mtime_ns) for p in
+                            (DATABASE, DATABASE.with_name(DATABASE.name + "-wal")) if os.path.lexists(p)])
     marker = STATE / "database-signature"
     if not force and marker.exists() and marker.read_text() == signature:
         return
-    with sqlite3.connect(f"file:{DATABASE}?mode=ro", uri=True) as database:
-        with sqlite3.connect(REPO / "user/comfyui.db") as target:
-            database.backup(target)
+    app_action("backup-database")
     private_write(marker, signature)
 
 
@@ -332,6 +419,9 @@ def checkpoint(force=False):
     """変わった部品だけを保存する。force なら、記録にある部品が Drive に残っているかも確かめる。"""
     if STORAGE is None or not REPO.exists():
         return False
+    if not (STATE / "setup-done").exists():
+        say(t("not_ready"))
+        return None
     STATE.mkdir(parents=True, exist_ok=True)
     with (STATE / "checkpoint.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -342,7 +432,7 @@ def checkpoint(force=False):
         write_lock()
         record = STATE / "saved-parts.json"
         saved = json.loads(record.read_text()) if record.exists() else {}
-        before = component_fingerprints(ENVDIR)
+        before = fingerprints()
         parts, sent = {}, []
         staging = STATE / "part.tar.gz"
         for name in sorted(before):
@@ -353,7 +443,7 @@ def checkpoint(force=False):
                 continue
             try:
                 with staging.open("wb") as file:
-                    write_archive(name, file)
+                    app_action("archive", name, sink=file, limit=ARCHIVE_LIMIT)
                 digest = file_hash(staging)
                 atomic_copy(staging, contained_path(STORAGE / "parts", digest + ".tar.gz"))
             finally:
@@ -362,7 +452,7 @@ def checkpoint(force=False):
             sent.append(name)
         if not sent and set(parts) == set(saved):
             return False
-        after = component_fingerprints(ENVDIR)
+        after = fingerprints()
         if any(after.get(name) != before[name] for name in sent):
             raise RuntimeError(t("busy"))
         # 一覧は最後に書く。それまでは前回の保存が指されたまま
@@ -396,14 +486,15 @@ def restore():
     if save["python"] != current:
         raise RuntimeError(t("python_changed", saved=save["python"], current=current))
     STATE.mkdir(parents=True, exist_ok=True)
-    ENVDIR.mkdir(parents=True, exist_ok=True)
     archive = STATE / "restore.tar.gz"
 
     def bring(folder, name, digest):
+        # root が Drive から受け取って確かめ、展開はその利用者に任せる
         atomic_copy(contained_path(folder, name), archive)
         if file_hash(archive) != digest:
             raise RuntimeError(t("sha_mismatch", name=name))
-        restore_archive(archive, ENVDIR)
+        with archive.open("rb") as file:
+            app_action("restore-archive", stdin=file)
         archive.unlink()
 
     if "parts" not in save:
@@ -420,9 +511,9 @@ def restore():
                 raise RuntimeError(t("bad_name"))
         for name in sorted(parts, key=lambda name: (name != "core", name)):  # 本体を先に
             bring(STORAGE / "parts", parts[name]["file"], parts[name]["sha256"])
-        fingerprints = component_fingerprints(ENVDIR)
-        restored = {name: {"fingerprint": fingerprints[name], "file": parts[name]["file"],
-                           "sha256": parts[name]["sha256"]} for name in parts if name in fingerprints}
+        found = fingerprints()
+        restored = {name: {"fingerprint": found[name], "file": parts[name]["file"],
+                           "sha256": parts[name]["sha256"]} for name in parts if name in found}
     private_write(STATE / "saved-parts.json", json.dumps(restored))
     say(t("restored", saved_at=save.get("saved_at", "-")))
     nodes = sorted(item.name for item in (REPO / "custom_nodes").glob("*")
@@ -432,7 +523,11 @@ def restore():
 
 
 def prepare():
-    """ComfyUI の外に置くフォルダーを作り、保存したデータベースを戻す。"""
+    app_action("prepare")
+
+
+def prepare_tree():
+    """ComfyUI の外に置くフォルダーを作り、保存したデータベースを戻す。その利用者として動く。"""
     for name in ("models", "output", "temp", "input", "home", "database"):
         (BASE / name).mkdir(parents=True, exist_ok=True)
     for name in MODEL_FOLDERS:
@@ -465,8 +560,8 @@ def refuse_unfinished_update():
 
 
 def git(*args, timeout=600):
-    return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True, check=True,
-                          timeout=timeout).stdout.strip()
+    """ComfyUI のリポジトリでの git。リポジトリの設定はその利用者が書き換えられるので、その利用者として動かす。"""
+    return app_user.capture(["git", *args], cwd=str(REPO), timeout=timeout).decode().strip()
 
 
 def latest_release():
@@ -480,7 +575,7 @@ def latest_release():
 
 
 def install_packages(*args):
-    subprocess.run([str(VENV_PY), "-m", "uv", "pip", "install", "--python", str(VENV_PY), "-q", *args], check=True)
+    app_user.run([str(VENV_PY), "-m", "uv", "pip", "install", "--python", str(VENV_PY), "-q", *args])
 
 
 def update_needed(ref):
@@ -496,7 +591,7 @@ def update_needed(ref):
     for name in ("refs/tags/" + ref, "refs/remotes/origin/" + ref, ref):
         try:
             target = git("rev-parse", "--verify", "--quiet", name + "^{commit}")
-        except subprocess.CalledProcessError:
+        except RuntimeError:
             continue
         if target == git("rev-parse", "--verify", "HEAD^{commit}"):
             say(t("update_already", version=git("describe", "--tags", "--always")[:80]))
@@ -516,7 +611,7 @@ def update(ref):
         # リポジトリはカスタムノードからも書き換えられるので、コミットの ID 以外は受け取らない
         try:
             found = git("rev-parse", "--verify", "--quiet", name + "^{commit}")
-        except subprocess.CalledProcessError:
+        except RuntimeError:
             return ""
         return found if re.fullmatch(r"[0-9a-f]{40,64}", found) else ""
 
@@ -529,15 +624,14 @@ def update(ref):
 
     def undo(state):
         """更新を始める前の版とパッケージに戻す。"""
-        packages = checked_lock(lock.read_text())
+        packages = checked_lock(read_env_file("requirements.lock.txt"))
         index = saved_torch_index()
         switch(state["commit"])
         install_packages("--index-strategy", "unsafe-best-match", "--extra-index-url", index, "-r", str(lock))
-        frozen = subprocess.run([str(VENV_PY), "-m", "pip", "freeze"], capture_output=True, text=True,
-                                check=True, timeout=300).stdout
+        frozen = app_user.capture([str(VENV_PY), "-m", "pip", "freeze"], timeout=300).decode()
         added = sorted(package_names(frozen) - package_names(packages))
         if added:
-            subprocess.run([str(VENV_PY), "-m", "uv", "pip", "uninstall", "--python", str(VENV_PY), *added], check=True)
+            app_user.run([str(VENV_PY), "-m", "uv", "pip", "uninstall", "--python", str(VENV_PY), *added])
         UPDATE_MARKER.unlink()
 
     if UPDATE_MARKER.exists():
@@ -560,8 +654,8 @@ def update(ref):
     try:
         switch(target)
         install_packages(*(argument for name in ("requirements.txt", "manager_requirements.txt")
-                           if (REPO / name).exists() for argument in ("-r", str(REPO / name))))
-        subprocess.run([str(VENV_PY), "-m", "pip", "check"], check=True)
+                           if (REPO / name).is_file() for argument in ("-r", str(REPO / name))))
+        app_user.run([str(VENV_PY), "-m", "pip", "check"])
     except Exception:
         try:
             undo(before)
@@ -580,8 +674,8 @@ def update(ref):
 def saved_apt_packages():
     """保存した環境が記録している apt パッケージを表示する。入れるかどうかは利用者が決める。"""
     try:
-        meta = json.loads((ENVDIR / "runtime.json").read_text())
-    except (OSError, ValueError):
+        meta = json.loads(read_env_file("runtime.json"))
+    except (OSError, ValueError, RuntimeError):
         return
     names = sorted({n for n in meta.get("apt_packages", []) if isinstance(n, str)
                     and re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", n)} - set(os.environ.get("APT_PACKAGES", "").split()))
@@ -591,10 +685,12 @@ def saved_apt_packages():
 
 def main(argv):
     command = argv[1] if len(argv) > 1 else ""
+    if command == "app":
+        return app_main(argv[2:])
     if command == "restore":
         return restore()
     if command == "save":
-        if STORAGE is not None and not checkpoint(force=len(argv) > 2 and argv[2] == "force"):
+        if STORAGE is not None and checkpoint(force=len(argv) > 2 and argv[2] == "force") is False:
             say(t("unchanged"))
         return 0
     if command == "loop":
@@ -621,8 +717,8 @@ def main(argv):
         write_lock()
         return 0
     if command == "check-lock":
-        checked_lock((ENVDIR / "requirements.lock.txt").read_text())
-        return 0
+        # 3 は PyTorch の無い記録。準備が途中で止まった環境を保存してしまったもので、記録は使わずに入れ直す
+        return 0 if has_torch(checked_lock(read_env_file("requirements.lock.txt"))) else 3
     if command == "apt-hint":
         saved_apt_packages()
         return 0

@@ -1,17 +1,22 @@
-"""Colab VM 上で、Hugging Face と Civitai のモデルをダウンロードする。
+"""Colab VM 上で、Hugging Face と Civitai のモデルをダウンロードする。root で動く。
 
-ComfyUI の画面からはノードがこのファイルを別のプロセスで起動し、ターミナルからは model-download.sh が ssh 越しに起動する。
+ComfyUI の画面からは root の model_helper.py がこのファイルの download を呼び、ターミナルからは model-download.sh が
+ssh 越しに起動する。トークンを root だけが持つため、ComfyUI のプロセスからは呼ばない。
 
     python3 model_download.py folders --models DIR [--drive-models DIR]
     python3 model_download.py download --models DIR [--drive-models DIR] --state DIR
                                        --url URL --folder NAME [--filename NAME] [--to-drive | --drive-later]
-                                       [--ledger FILE]
+                                       [--ledger FILE [--ledger-mirror FILE] | --runtime-only-file FILE]
                                        [--tokens-file FILE | --tokens-stdin] [--progress-file FILE] [--bar]
 
-ランタイムの models に .part として書き、書き終えてから正しい名前にする。SHA256 は計算して表示する。--to-drive なら、続けて Google ドライブにもコピーする。
---drive-later は、ドライブに置けるかだけを確かめてコピーはしない。ComfyUI のノードが、ダウンロードの後にバックグラウンドでコピーする。
+ランタイムの models に .part として書き、書き終えてから正しい名前にする。SHA256 は計算して表示する。
+models は ComfyUI の利用者のものなので、model_sources.AppTree でリンクをたどらずに書き、できたファイルはその利用者に渡す。
+--to-drive なら、続けて Google ドライブにもコピーする。
+--drive-later は、ドライブに置けるかだけを確かめてコピーはしない。model_helper.py が、ダウンロードの後にバックグラウンドでコピーする。
 ランタイムのディスクに先に書くので、ComfyUI ではすぐに使える。ドライブへの書き込みは遅いことがあるため、この順にしている。
---ledger があれば、保存先とダウンロード元を台帳に記録する。台帳にあるモデルは、次のランタイムでも ComfyUI の一覧に出る。
+--ledger があれば、保存先とダウンロード元を台帳に記録し、--ledger-mirror の写しも書き直す。
+台帳にあるモデルは、次のランタイムでも ComfyUI の一覧に出る。
+--ledger が無ければ --runtime-only-file に記録し、Manager などのモデルと違ってドライブへ自動では写さない。
 """
 
 import argparse
@@ -22,8 +27,6 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import secrets
-import shutil
 import signal
 import socket
 import sys
@@ -241,21 +244,14 @@ def folders(models, drive_models):
     return sorted(names)
 
 
-def inside(root, relative):
-    target = root / relative
-    if not target.resolve().is_relative_to(root.resolve()):
-        raise Failure(t("bad_folder", folder=relative))
-    return target
-
-
 # ---- 進み具合 ----
 
 class Progress:
     """進み具合を、画面用のファイルと、ターミナル用の 1 行のバーに出す。
     バーはメッセージと同じ標準出力に書く。ssh 越しだと標準出力と標準エラーは別々に届き、順番が入れ替わるため。"""
 
-    def __init__(self, path, bar, name):
-        self.path, self.bar, self.name = path, bar, name
+    def __init__(self, path, bar, name, sink=None):
+        self.path, self.bar, self.name, self.sink = path, bar, name, sink
         self.started = self.last = time.monotonic()
         self.phase, self.done, self.total = "download", 0, 0
         self.saved = ""
@@ -270,10 +266,17 @@ class Progress:
             data = {"state": state, "phase": self.phase, "name": self.name, "received": self.done,
                     "total": self.total, "speed": speed, "message": message}
             if state == "done" and self.saved:
-                data["path"] = self.saved  # models から見た保存先。ノードがドライブへのコピーに使う
+                data["path"] = self.saved  # models から見た保存先
             temporary = self.path.with_suffix(".tmp")
             temporary.write_text(json.dumps(data))
             os.replace(temporary, self.path)
+        if self.sink:
+            # root の model_helper.py が、ComfyUI のノードへ送る。送れなければ中止として扱う
+            data = {"state": state, "phase": self.phase, "name": self.name, "received": self.done,
+                    "total": self.total, "speed": speed, "message": message}
+            if state == "done" and self.saved:
+                data["path"] = self.saved
+            self.sink(data)
         if self.bar and state == "running":
             label = t("downloading") if self.phase == "download" else t("copying")
             if self.total:
@@ -312,21 +315,6 @@ class Progress:
 
 # ---- ダウンロード ----
 
-def copy_with_progress(source, target, progress):
-    progress.start("copy", source.stat().st_size)
-    partial = target.with_name(".comfy-" + secrets.token_hex(8) + ".part")
-    try:
-        with source.open("rb") as src, partial.open("wb") as dst:
-            for chunk in iter(lambda: src.read(8 * 1024 * 1024), b""):
-                dst.write(chunk)
-                progress.advance(len(chunk))
-        if target.exists():
-            raise Failure(t("exists", path=target))
-        os.replace(partial, target)
-    finally:
-        partial.unlink(missing_ok=True)
-
-
 def pinned_url(url, commit):
     """Hugging Face の URL を、ダウンロードしたときのコミットに固定する。後で同じ中身を取り直せるようにするため。"""
     if not commit:
@@ -339,78 +327,110 @@ def pinned_url(url, commit):
     return url
 
 
+def _tree(models):
+    """ランタイムの models。ComfyUI を root ではない利用者で動かすときは、作ったファイルをその利用者に渡す。"""
+    import app_user  # 同じフォルダーにある
+    import model_sources
+    return model_sources.AppTree(models, app_user.app_ids())
+
+
+class _CopyProgress:
+    """model_sources.copy_to_drive の進み具合を、ダウンロードと同じバーと画面に出す。"""
+
+    def __init__(self, progress):
+        self.progress = progress
+
+    def start(self, source, total):
+        self.progress.start("copy", total)
+
+    def advance(self, amount):
+        self.progress.advance(amount)
+
+
 def download(args, tokens, progress):
+    import model_sources  # 同じフォルダーにある
     url, suggested, token_name = parse_model_url(args.url)
     folder = safe_folder(args.folder)
     given = args.filename.strip() or suggested
     name = safe_filename(given) if given else ""
-    models = Path(args.models)
+    tree = _tree(Path(args.models))
     drive_models = Path(args.drive_models) if args.drive_models else None
     to_drive = args.to_drive or args.drive_later
     if to_drive and not (drive_models and drive_models.parent.is_dir()):
         raise Failure(t("no_drive"))
 
     def check_free(target_name):
-        for root in [models] + ([drive_models] if to_drive else []):
-            if (root / folder / target_name).exists():
-                raise Failure(t("exists", path=f"{folder}/{target_name}"))
+        key = f"{folder}/{target_name}"
+        if not model_sources.valid_key(key):
+            raise Failure(t("bad_filename", name=target_name))
+        if tree.exists(key) or (to_drive and (drive_models / key).exists()):
+            raise Failure(t("exists", path=key))
+        return key
 
     if name:
         check_free(name)
-    local_dir = inside(models, folder)
-    local_dir.mkdir(parents=True, exist_ok=True)
-    partial = local_dir / (".comfy-" + secrets.token_hex(8) + ".part")
     seen = {}
     try:
+        response = open_download(url, tokens.get(token_name, ""), seen)
+    except HTTPError as error:
+        hint = t("hint_auth", token=token_name) if error.code in {401, 403} and not tokens.get(token_name) else ""
+        raise Failure(t("http_error", status=error.code, hint=hint)) from None
+    except URLError as error:
+        raise Failure(t("connection", reason=error.reason)) from None
+    with response:
+        length = response.headers.get("Content-Length", "")
+        total = int(length) if length.isdigit() else 0
+        name = name or served_filename(response.headers)
+        if not name:
+            raise Failure(t("no_filename"))
+        progress.name = name
+        relative = check_free(name)
         try:
-            response = open_download(url, tokens.get(token_name, ""), seen)
-        except HTTPError as error:
-            hint = t("hint_auth", token=token_name) if error.code in {401, 403} and not tokens.get(token_name) else ""
-            raise Failure(t("http_error", status=error.code, hint=hint)) from None
-        except URLError as error:
-            raise Failure(t("connection", reason=error.reason)) from None
-        with response:
-            length = response.headers.get("Content-Length", "")
-            total = int(length) if length.isdigit() else 0
-            free = shutil.disk_usage(local_dir).free
-            if total and total + 1024 ** 3 > free:
-                raise Failure(t("no_space", need=size_text(total), free=size_text(free)))
-            name = name or served_filename(response.headers)
-            if not name:
-                raise Failure(t("no_filename"))
-            progress.name = name
-            check_free(name)
-            digest = hashlib.sha256()
-            progress.start("download", total)
-            with partial.open("wb") as file:
-                for chunk in iter(lambda: response.read(4 * 1024 * 1024), b""):
-                    file.write(chunk)
-                    digest.update(chunk)
-                    progress.advance(len(chunk))
-        if not partial.stat().st_size:
-            raise Failure(t("empty"))
-        target = local_dir / name
-        check_free(name)
-        os.replace(partial, target)
-    finally:
-        partial.unlink(missing_ok=True)
-    relative = f"{folder}/{name}"
+            free = tree.free(folder.split("/"))
+        except model_sources.Failure as failure:
+            raise Failure(str(failure)) from None
+        if total and total + 1024 ** 3 > free:
+            raise Failure(t("no_space", need=size_text(total), free=size_text(free)))
+        digest = hashlib.sha256()
+        written = 0
+        progress.start("download", total)
+        new = tree.create(relative)
+        try:
+            for chunk in iter(lambda: response.read(4 * 1024 * 1024), b""):
+                model_sources.write_all(new.fd, chunk)
+                digest.update(chunk)
+                written += len(chunk)
+                progress.advance(len(chunk))
+            if not written:
+                raise Failure(t("empty"))
+            try:
+                new.commit()
+            except FileExistsError:
+                raise Failure(t("exists", path=relative)) from None
+        finally:
+            new.discard()
     progress.saved = relative
+    state = Path(args.state or args.models)
     if args.ledger:
-        import model_sources  # 同じフォルダーにある
-        model_sources.Ledger(args.ledger, Path(args.state or args.models) / "ledger.lock").record(
-            relative, pinned_url(url, seen.get("commit", "")), args.url.strip(), digest.hexdigest(), target.stat().st_size)
+        model_sources.Ledger(args.ledger, state / "ledger.lock", args.ledger_mirror or None).record(
+            relative, pinned_url(url, seen.get("commit", "")), args.url.strip(), digest.hexdigest(), written)
+    elif args.runtime_only_file:
+        # 台帳に記録しないモデルは、Manager などのモデルと区別して、ドライブへ自動で写さない
+        model_sources.add_runtime_only(args.runtime_only_file, relative, state / "runtime-only.lock")
     if args.to_drive:
-        drive_dir = inside(drive_models, folder)
-        drive_dir.mkdir(parents=True, exist_ok=True)
-        copy_with_progress(target, drive_dir / name, progress)
+        try:
+            copied = model_sources.copy_to_drive(tree, relative, drive_models / relative, _CopyProgress(progress), written)
+        except model_sources.Failure as failure:
+            raise Failure(str(failure)) from None
+        if not copied:
+            raise Failure(t("exists", path=relative))
         return t("saved_drive", path=relative) + " SHA256: " + digest.hexdigest()
     if args.drive_later:
         return t("saved_drive_later", path=relative) + " SHA256: " + digest.hexdigest()
     return t("saved_runtime", path=relative) + " SHA256: " + digest.hexdigest()
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=["folders", "download"])
     parser.add_argument("--models", required=True)
@@ -422,11 +442,17 @@ def main():
     parser.add_argument("--to-drive", action="store_true")
     parser.add_argument("--drive-later", action="store_true")
     parser.add_argument("--ledger", default="")
+    parser.add_argument("--ledger-mirror", default="")
+    parser.add_argument("--runtime-only-file", default="")
     parser.add_argument("--tokens-file", default="")
     parser.add_argument("--tokens-stdin", action="store_true")
     parser.add_argument("--progress-file", default="")
     parser.add_argument("--bar", action="store_true")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def main():
+    args = parse_args()
 
     drive_models = Path(args.drive_models) if args.drive_models else None
     if args.command == "folders":

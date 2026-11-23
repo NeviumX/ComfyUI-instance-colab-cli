@@ -25,8 +25,17 @@ SSH_OPTS=(-F "$ROOT/ssh_config")
 # 共有 SSH 接続のソケットの置き場所
 mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
 
-# Colab VM 側の場所。Drive は colab drivemount の既定の場所にマウントする
-DRIVE_MOUNT="${DRIVE_MOUNT:-/content/drive}"
+# Colab VM 側の場所。ISOLATE_COMFY=1 なら、ComfyUI を root ではない利用者で動かし、Drive は root だけが入れる
+# PRIVATE_DIR の中にマウントする。ComfyUI には DRIVE_VIEW に models だけを読み取り専用で見せる
+ISOLATE_COMFY="${ISOLATE_COMFY:-1}"
+PRIVATE_DIR="${PRIVATE_DIR:-/content/.comfy-private}"
+DRIVE_VIEW="${DRIVE_VIEW:-/content/comfy-drive-models}"
+COMFY_APP_UV_CACHE="${COMFY_APP_UV_CACHE:-}"
+if [[ "$ISOLATE_COMFY" == 1 ]]; then
+    DRIVE_MOUNT="${DRIVE_MOUNT:-$PRIVATE_DIR/drive}"
+else
+    DRIVE_MOUNT="${DRIVE_MOUNT:-/content/drive}"
+fi
 # shellcheck disable=SC2034  # remote_env で Colab VM に渡す
 DRIVE_MODELS="$DRIVE_MOUNT/MyDrive/$DRIVE_FOLDER/models"
 # shellcheck disable=SC2034  # remote_env で Colab VM に渡す
@@ -45,6 +54,8 @@ CIVITAI_TOKEN="${CIVITAI_TOKEN:-}"
 TMUX_SESSION=comfyui
 # shellcheck disable=SC2034  # remote_env で Colab VM に渡す
 SAVE_SESSION=comfyui-save
+# shellcheck disable=SC2034  # remote_env で Colab VM に渡す
+HELPER_SESSION=comfyui-helper
 NODE_NAME=comfyui-colab-cli
 LOCAL_URL="http://localhost:$LOCAL_PORT"
 
@@ -131,6 +142,10 @@ ensure_drive() {
         return 0
     fi
     log "$(msg drive_mounting)"
+    # マウントの場所の親は root だけが入れるようにしておく。ComfyUI の利用者からドライブ全体が見えないように
+    if [[ "$ISOLATE_COMFY" == 1 ]]; then
+        rssh "mkdir -p $(printf '%q' "$PRIVATE_DIR") && chmod 700 $(printf '%q' "$PRIVATE_DIR")" 2>/dev/null || true
+    fi
     # 認可のページを Windows のブラウザで開かせる。BROWSER は Python の webbrowser が読む
     PATH="$ROOT/lib/browser:$PATH" BROWSER=open-url.sh colab drivemount -s "$COLAB_SESSION" "$DRIVE_MOUNT" || true
     if drive_mounted; then
@@ -166,15 +181,21 @@ remote_start() {
         rssh "$(remote_env COMFY_REPO COMFY_REF COMFY_BASE REMOTE_PORT INSTALL_MANAGER CUSTOM_NODES COMFY_EXTRA_ARGS \
                 APT_PACKAGES REMOTE_LOG FORCE_RESTART MSG_LANG DRIVE_READY DRIVE_MODELS DRIVE_STORAGE DRIVE_LEDGER MODEL_SOURCE \
                 SAVE_ENVIRONMENT RESTORE_ENVIRONMENT SAVE_INTERVAL_SEC AUTO_UPDATE USE_SAGE_ATTENTION PULL_OUTPUTS_ON_STOP \
-                STAGE_DIR TMUX_SESSION SAVE_SESSION NODE_NAME) bash -s"
+                STAGE_DIR TMUX_SESSION SAVE_SESSION HELPER_SESSION NODE_NAME \
+                ISOLATE_COMFY PRIVATE_DIR DRIVE_VIEW COMFY_APP_UV_CACHE) bash -s"
 }
 
 # 停止ボタンのカスタムノード、環境を保存・復元・更新する comfy_env.py、モデルをダウンロードする model_download.py、
-# 台帳とモデルの取得の model_sources.py を VM へ送る
+# 台帳とモデルの取得の model_sources.py、root のモデルの仕事の model_helper.py、利用者を分ける app_user.py を VM へ送る。
+# root が実行するので、root のものにして、ほかの利用者からは書けないようにする
+REMOTE_LIB_FILES=(lib/comfy_env.py lib/model_download.py lib/model_sources.py lib/model_helper.py lib/app_user.py)
 upload_files() {
     tar -C "$ROOT" --exclude=__pycache__ --transform 's#^node/#custom_nodes/#;s#^lib/##' \
-        -cf - "node/$NODE_NAME" lib/comfy_env.py lib/model_download.py lib/model_sources.py |
-        rssh "mkdir -p $STAGE_DIR && rm -rf $STAGE_DIR/custom_nodes/$NODE_NAME && tar -C $STAGE_DIR -xf -" ||
+        -cf - "node/$NODE_NAME" "${REMOTE_LIB_FILES[@]}" |
+        rssh "mkdir -p $STAGE_DIR && chmod 755 $STAGE_DIR && rm -rf $STAGE_DIR/custom_nodes/$NODE_NAME &&
+              tar -C $STAGE_DIR --no-same-owner --no-same-permissions -xf - &&
+              chown -R 0:0 $STAGE_DIR/custom_nodes $STAGE_DIR/*.py 2>/dev/null;
+              chmod -R u=rwX,go=rX $STAGE_DIR/custom_nodes $STAGE_DIR/*.py" ||
         die "$(msg node_upload_failed)"
     upload_tokens
     upload_ledger
@@ -183,7 +204,8 @@ upload_files() {
 # 手元の台帳を VM へ送る。VM はドライブの台帳か、VM の中の台帳に合わせて使う
 upload_ledger() {
     [[ -f "$LEDGER_LOCAL" ]] || return 0
-    rssh "mkdir -p $STAGE_DIR/state && cat > $STAGE_DIR/state/model-sources.local.json" < "$LEDGER_LOCAL" ||
+    rssh "umask 077 && mkdir -p $STAGE_DIR/state && chmod 700 $STAGE_DIR/state &&
+          cat > $STAGE_DIR/state/model-sources.local.json" < "$LEDGER_LOCAL" ||
         warn "$(msg ledger_upload_failed)"
 }
 
@@ -230,7 +252,8 @@ send_drive_token() {
         warn "$(msg drive_api_token_failed)"
         return 1
     fi
-    printf '%s' "$out" | rssh "umask 077 && mkdir -p $STAGE_DIR/state && cat > $STAGE_DIR/state/.drive-token.tmp &&
+    printf '%s' "$out" | rssh "umask 077 && mkdir -p $STAGE_DIR/state && chmod 700 $STAGE_DIR/state &&
+        cat > $STAGE_DIR/state/.drive-token.tmp &&
         mv -f $STAGE_DIR/state/.drive-token.tmp $STAGE_DIR/state/drive-token.json" || { warn "$(msg drive_api_send_failed)"; return 1; }
 }
 
@@ -269,7 +292,8 @@ tokens_json() {
 # トークンを VM の root だけが読めるファイルに置く。ComfyUI の画面からのダウンロードが使う。
 # コマンドの引数には載せず、標準入力で渡す
 upload_tokens() {
-    tokens_json | rssh "umask 077 && mkdir -p $STAGE_DIR/state && cat > $STAGE_DIR/state/tokens.json" ||
+    tokens_json | rssh "umask 077 && mkdir -p $STAGE_DIR/state && chmod 700 $STAGE_DIR/state &&
+                        cat > $STAGE_DIR/state/tokens.json" ||
         warn "$(msg token_upload_failed)"
 }
 
@@ -298,7 +322,7 @@ remote_poll() {
     rssh "if curl -sf -m 5 http://127.0.0.1:$REMOTE_PORT$HEALTH_PATH >/dev/null 2>&1; then echo HEALTHY;
           elif tail -n 40 $q_log 2>/dev/null | grep -qiE '$PORT_ERR_RE'; then echo PORT_IN_USE;
           elif tail -n 5 $q_log 2>/dev/null | grep -qF '$EXIT_MARK'; then echo EXITED;
-          elif ! tmux has-session -t $TMUX_SESSION 2>/dev/null; then echo NOT_RUNNING;
+          elif ! tmux has-session -t =$TMUX_SESSION 2>/dev/null; then echo NOT_RUNNING;
           else tail -c 400 $q_log 2>/dev/null | tr '\r' '\n' | grep -v '^[[:space:]]*\$' | tail -n 1; fi" \
         2>/dev/null || msg ssh_no_response
 }
@@ -330,11 +354,18 @@ wait_healthy() {
     done
 }
 
-# ComfyUI を止める。Drive のファイルを開いたままにしないよう、作業フォルダーが ComfyUI の中にあるプロセスが消えるまで待つ
+# ComfyUI を止める。Drive のファイルを開いたままにしないよう、ComfyUI の利用者のプロセスと、
+# 作業フォルダーが ComfyUI の中にあるプロセスが消えるまで待ち、models の見え方を外す
 remote_stop_comfy() {
-    rssh "$(remote_env COMFY_DIR TMUX_SESSION SAVE_SESSION) bash -s" >/dev/null 2>&1 <<'EOF' || true
-tmux kill-session -t "$TMUX_SESSION" 2>/dev/null
-tmux kill-session -t "$SAVE_SESSION" 2>/dev/null
+    rssh "$(remote_env COMFY_DIR TMUX_SESSION SAVE_SESSION HELPER_SESSION STAGE_DIR DRIVE_VIEW) bash -s" >/dev/null 2>&1 <<'EOF' || true
+tmux kill-session -t "=$TMUX_SESSION" 2>/dev/null
+tmux kill-session -t "=$SAVE_SESSION" 2>/dev/null
+tmux kill-session -t "=$HELPER_SESSION" 2>/dev/null
+if [ -f "$STAGE_DIR/env.sh" ]; then
+    . "$STAGE_DIR/env.sh"
+    "$COMFY_PYTHON" "$STAGE_DIR/app_user.py" stop
+    "$COMFY_PYTHON" "$STAGE_DIR/app_user.py" hide-view "$DRIVE_VIEW"
+fi
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     pids=""
     for d in /proc/[0-9]*; do
@@ -388,8 +419,10 @@ pull_outputs() {
     mkdir -p "$dest"
     before="$(find "$dest" -type f | wc -l)"
     log "$(msg pull_start "$dest")"
-    rssh "tar -C $q_out --exclude=./_output_images_will_be_put_here -cf - ." |
-        tar -C "$dest" --skip-old-files --no-same-owner --no-same-permissions -xf - || return 1
+    # 書庫は ComfyUI の利用者が作る。中身はその利用者が決められるので、手元では通常のファイルとフォルダーだけを取り出す
+    rssh "source $STAGE_DIR/env.sh && \"\$COMFY_PYTHON\" $STAGE_DIR/app_user.py run --cwd $q_out -- \
+          tar --exclude=./_output_images_will_be_put_here -cf - ." |
+        python3 "$ROOT/lib/untar_outputs.py" "$dest" || return 1
     after="$(find "$dest" -type f | wc -l)"
     log "$(msg pull_done "$((after - before))" "$dest")"
 }

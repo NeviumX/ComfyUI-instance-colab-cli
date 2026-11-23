@@ -3,8 +3,10 @@
 #   ./ssh.sh                 シェルに入る
 #   ./ssh.sh nvidia-smi      コマンドを実行する
 #   ./ssh.sh -v true         接続の詳細を表示する。ssh_config を調整するときに使う
-#   ./ssh.sh -t tmux attach -t comfyui   ComfyUI のコンソールを見る。抜けるのは Ctrl-b d
+#   ./ssh.sh -t tmux attach -t =comfyui   ComfyUI のコンソールを見る。抜けるのは Ctrl-b d
 #   ./ssh.sh -O exit         共有 SSH 接続を閉じる
+#   ./ssh.sh app             ComfyUI を動かしている利用者として、作業場所のシェルに入る
+#   ./ssh.sh app pip list    その利用者としてコマンドを実行する。venv の pip などは、root ではなくこちらで使う
 source "$(dirname "$0")/lib/common.sh"
 
 # ProxyCommand はランタイムが無いと自動作成してしまうので、先に確かめる
@@ -17,5 +19,15 @@ fi
 
 opts=()
 while [[ $# -gt 0 && "$1" == -* ]]; do opts+=("$1"); shift; done
+
+if [[ "${1:-}" == app ]]; then
+    shift
+    words=("$@")
+    (( ${#words[@]} > 0 )) || words=(bash -l)
+    remote="source $(printf '%q' "$STAGE_DIR/env.sh") && exec \"\$COMFY_PYTHON\" $(printf '%q' "$STAGE_DIR/app_user.py")"
+    remote+=" run --cwd \"\$COMFY_BASE\" --"
+    for w in "${words[@]}"; do remote+=" $(printf '%q' "$w")"; done
+    exec ssh "${SSH_OPTS[@]}" -t "${opts[@]}" "$SSH_HOST" "$remote"
+fi
 
 exec ssh "${SSH_OPTS[@]}" "${opts[@]}" "$SSH_HOST" "$@"

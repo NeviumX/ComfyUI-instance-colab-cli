@@ -6,6 +6,7 @@ start.bat のウィンドウがトンネル越しに GET /colab_cli/stop を数�
 ボタンのダイアログからは、ComfyUI の出力をまとめて ZIP でダウンロードすることもできる。
 「モデル」ボタンからは、Hugging Face と Civitai のモデルをランタイムか Google ドライブにダウンロードできる。
 ランタイムに写しが無いモデルは、ノードで使われたときにランタイムへ取ってくる。取り方は model_sources.py に書いてある。
+ComfyUI は root ではない利用者で動くので、ダウンロードと取得とドライブへの書き込みは、root の model_helper.py に頼む。
 """
 
 import asyncio
@@ -93,62 +94,123 @@ async def colab_cli_stop_reset(request):
     return _answer(STATE)
 
 
-# ---- モデルのダウンロード ----
-# ダウンロードは、手元から送った model_download.py を別のプロセスで動かす。ComfyUI を止めずに中止できるようにするため
+# ---- root の model_helper.py への頼み ----
+# ComfyUI は root ではない利用者で動くので、ドライブに書けず、トークンも読めない。
+# モデルのダウンロード、写しの取得、台帳の書き換え、ドライブへのコピーは、root で動く model_helper.py に Unix ソケットで頼む。
+# 台帳は、model_helper.py が置いた写しを読むだけ。
 
 STAGE = Path(os.environ.get("COMFY_COLAB_CLI_STAGE", "/content/.comfy-colab-cli"))
 DOWNLOADER = STAGE / "model_download.py"
-DOWNLOAD_PROGRESS = STAGE / "state/download-progress.json"
-DOWNLOAD_JOB = {"process": None}
-
-
-def _downloader_args(command):
-    args = [sys.executable, str(DOWNLOADER), command, "--models", os.environ.get("COMFY_COLAB_CLI_MODELS", "")]
-    drive_models = os.environ.get("COMFY_COLAB_CLI_DRIVE_MODELS", "")
-    if drive_models:
-        args += ["--drive-models", drive_models]
-    return args
-
-
-# 保存先の選択肢。runtime はランタイムだけで台帳に記録しない。ledger はランタイムに置いて台帳に記録する。
-# drive は台帳に記録し、ダウンロードが終わってからバックグラウンドでドライブにコピーする。
+HELPER = os.environ.get("COMFY_COLAB_CLI_HELPER", "")
+RUNTIME_MODELS = os.environ.get("COMFY_COLAB_CLI_MODELS", "")
+DRIVE_MODELS = os.environ.get("COMFY_COLAB_CLI_DRIVE_MODELS", "")
 WHERE = {"runtime", "ledger", "drive"}
-RUNTIME_ONLY = set()  # ランタイムだけと選ばれたモデル。ドライブへの自動のコピーから外す
+if str(STAGE) not in sys.path:
+    sys.path.insert(0, str(STAGE))
 
 
-def _drive_copy(key):
-    """ダウンロードが終わったモデルを、ドライブへ写す。別のスレッドで動かす。"""
-    if str(STAGE) not in sys.path:
-        sys.path.insert(0, str(STAGE))
-    import model_sources
-    report = model_sources.Report(_notify, key)
+class _Interrupted(Exception):
+    """ComfyUI の中断で、頼みをやめた。"""
+
+
+class _HelperCall:
+    """model_helper.py への 1 つの頼み。close で中止する。"""
+
+    def __init__(self, request):
+        import socket
+        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.socket.settimeout(10)
+        try:
+            self.socket.connect(HELPER)
+            self.socket.sendall((json.dumps(request) + "\n").encode())
+        except OSError:
+            self.socket.close()
+            raise
+        self.socket.settimeout(0.5)
+
+    def events(self, interrupted=None):
+        import socket
+        buffer = b""
+        try:
+            while True:
+                try:
+                    chunk = self.socket.recv(65536)
+                except socket.timeout:
+                    if interrupted and interrupted():
+                        raise _Interrupted()
+                    continue
+                except OSError:
+                    return
+                if not chunk:
+                    return
+                buffer += chunk
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    event = json.loads(line)
+                    yield event
+                    if event.get("event") == "end":
+                        return
+        finally:
+            self.close()
+
+    def close(self):
+        import socket
+        try:
+            self.socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.socket.close()
+
+
+def _notify(data):
     try:
-        if model_sources.copy_to_drive(Path(RUNTIME_MODELS) / key, Path(DRIVE_MODELS) / key, report):
-            print(f"[comfyui-colab-cli] copied to Google Drive: {key}", flush=True)
-            _notify({"state": "backed_up", "name": key, "message": model_sources.t("backed_up", name=key)})
-        else:
-            reason = model_sources.t("drive_exists")
-            _notify({"state": "backup_failed", "name": key, "message": model_sources.t("backup_failed", name=key, reason=reason)})
+        PromptServer.instance.send_sync("colab_cli.model_fetch", data)
+    except Exception:
+        pass
+
+
+def _subscribe_loop():
+    """バックグラウンドの仕事の知らせを、画面の右下へ送る。model_helper.py が起動し直しても、つなぎ直す。"""
+    while True:
+        try:
+            for event in _HelperCall({"op": "subscribe"}).events():
+                if event.get("event") == "notify":
+                    _notify(event.get("data") or {})
+        except Exception:
+            pass
+        time.sleep(5)
+
+
+# ---- モデルのダウンロード ----
+
+DOWNLOAD = {"call": None, "thread": None, "cancelled": False, "state": {"state": "idle"}}
+
+
+def _download_running():
+    thread = DOWNLOAD["thread"]
+    return thread is not None and thread.is_alive()
+
+
+def _download_worker(call):
+    import model_download
+    last = {"state": "running"}
+    try:
+        for event in call.events():
+            if event.get("event") == "progress":
+                last = event.get("data") or last
+                DOWNLOAD["state"] = last
+            elif event.get("event") == "end":
+                DOWNLOAD["state"] = {**last, "state": event.get("state", "failed"),
+                                     "message": event.get("message", ""), "path": event.get("path", "")}
+                return
     except Exception as error:
-        print(f"[comfyui-colab-cli] Drive copy: {type(error).__name__}: {error}", flush=True)
-        _notify({"state": "backup_failed", "name": key,
-                 "message": model_sources.t("backup_failed", name=key, reason=f"{type(error).__name__}: {error}")})
-
-
-async def _after_download(process, where):
-    """ダウンロードの終わりを待ち、選ばれた保存先に合わせて後の処理をする。"""
-    await process.wait()
-    try:
-        progress = json.loads(DOWNLOAD_PROGRESS.read_text())
-    except (OSError, ValueError):
+        DOWNLOAD["state"] = {**last, "state": "failed", "message": f"{type(error).__name__}: {error}"}
         return
-    key = progress.get("path", "")
-    if progress.get("state") != "done" or not key:
-        return
-    if where == "runtime":
-        RUNTIME_ONLY.add(key)
-    elif where == "drive" and DRIVE_MODELS:
-        threading.Thread(target=_drive_copy, args=(key,), name="colab-cli-drive-copy-now", daemon=True).start()
+    # 終わりの知らせが来ないまま切れた
+    if DOWNLOAD["cancelled"]:
+        DOWNLOAD["state"] = {**last, "state": "cancelled", "message": model_download.t("cancelled")}
+    else:
+        DOWNLOAD["state"] = {**last, "state": "failed", "message": "model_helper.py closed the connection"}
 
 
 async def _json_body(request):
@@ -167,7 +229,10 @@ async def _json_body(request):
 async def colab_cli_model_folders(request):
     if not DOWNLOADER.exists():
         return _answer({"error": "downloader missing"}, 503)
-    process = await asyncio.create_subprocess_exec(*_downloader_args("folders"), stdout=asyncio.subprocess.PIPE)
+    args = [sys.executable, str(DOWNLOADER), "folders", "--models", RUNTIME_MODELS]
+    if DRIVE_MODELS:
+        args += ["--drive-models", DRIVE_MODELS]
+    process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE)
     out, _ = await process.communicate()
     try:
         return _answer(json.loads(out))
@@ -180,42 +245,27 @@ async def colab_cli_model_download(request):
     body, refused = await _json_body(request)
     if refused:
         return refused
-    process = DOWNLOAD_JOB["process"]
-    if process is not None and process.returncode is None:
+    if _download_running():
         return _answer({"error": "busy"}, 409)
-    DOWNLOAD_PROGRESS.parent.mkdir(parents=True, exist_ok=True)
-    DOWNLOAD_PROGRESS.unlink(missing_ok=True)
-    args = _downloader_args("download") + [
-        "--state", str(STAGE / "state"), "--tokens-file", str(STAGE / "state/tokens.json"),
-        "--progress-file", str(DOWNLOAD_PROGRESS),
-        "--url", str(body.get("url", "")), "--folder", str(body.get("folder", "")),
-        "--filename", str(body.get("filename", ""))]
     where = body.get("where")
     if where not in WHERE:
         # 前の画面は to_drive だけを送る
         where = "drive" if body.get("to_drive") is True else "ledger"
-    if where != "runtime" and os.environ.get("COMFY_COLAB_CLI_LEDGER"):
-        args += ["--ledger", os.environ["COMFY_COLAB_CLI_LEDGER"]]
-    if where == "drive":
-        args.append("--drive-later")
-    process = await asyncio.create_subprocess_exec(
-        *args, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
-    DOWNLOAD_JOB["process"] = process
-    DOWNLOAD_JOB["after"] = asyncio.ensure_future(_after_download(process, where))
+    wanted = {"op": "download", "where": where,
+              **{name: str(body.get(name, "")) for name in ("url", "folder", "filename")}}
+    try:
+        call = await asyncio.get_running_loop().run_in_executor(None, _HelperCall, wanted)
+    except OSError:
+        return _answer({"error": "model helper unavailable"}, 503)
+    DOWNLOAD.update(call=call, cancelled=False, state={"state": "running", "received": 0, "total": 0})
+    DOWNLOAD["thread"] = threading.Thread(target=_download_worker, args=(call,), name="colab-cli-download", daemon=True)
+    DOWNLOAD["thread"].start()
     return _answer({"state": "running"})
 
 
 @routes.get("/colab_cli/models/download")
 async def colab_cli_model_download_state(request):
-    process = DOWNLOAD_JOB["process"]
-    try:
-        progress = json.loads(DOWNLOAD_PROGRESS.read_text())
-    except (OSError, ValueError):
-        progress = {"state": "running" if process is not None and process.returncode is None else "idle"}
-    # 進み具合を書けずに終わったときも、画面が待ち続けないようにする
-    if progress.get("state") == "running" and process is not None and process.returncode is not None:
-        progress["state"] = "failed"
-    return _answer(progress)
+    return _answer(DOWNLOAD["state"])
 
 
 @routes.post("/colab_cli/models/dismiss")
@@ -224,9 +274,8 @@ async def colab_cli_model_dismiss(request):
     _, refused = await _json_body(request)
     if refused:
         return refused
-    process = DOWNLOAD_JOB["process"]
-    if process is None or process.returncode is not None:
-        DOWNLOAD_PROGRESS.unlink(missing_ok=True)
+    if not _download_running():
+        DOWNLOAD["state"] = {"state": "idle"}
     return _answer({"state": "idle"})
 
 
@@ -235,27 +284,18 @@ async def colab_cli_model_cancel(request):
     _, refused = await _json_body(request)
     if refused:
         return refused
-    process = DOWNLOAD_JOB["process"]
-    if process is not None and process.returncode is None:
-        process.terminate()
+    if _download_running() and DOWNLOAD["call"] is not None:
+        # 接続を閉じると、model_helper.py は書きかけのファイルを消してやめる
+        DOWNLOAD["cancelled"] = True
+        DOWNLOAD["call"].close()
     return _answer({"state": "cancelling"})
 
 
 # ---- 台帳とモデルの取得 ----
-# 台帳にしかないモデルも一覧に出し、ノードで使われたときにランタイムへ取ってくる。
+# 台帳にしかないモデルも一覧に出し、ノードで使われたときにランタイムへ取ってきてもらう。
 # 一覧と場所を返す ComfyUI の関数を包む。包めなかったときは、今までどおりドライブから直接読む。
 
-RUNTIME_MODELS = os.environ.get("COMFY_COLAB_CLI_MODELS", "")
-DRIVE_MODELS = os.environ.get("COMFY_COLAB_CLI_DRIVE_MODELS", "")
 LEDGER = None
-FETCHER = None
-
-
-def _notify(data):
-    try:
-        PromptServer.instance.send_sync("colab_cli.model_fetch", data)
-    except Exception:
-        pass
 
 
 def _interrupted():
@@ -295,19 +335,34 @@ def _model_tops(folder_paths, folder_name):
     return tops
 
 
+class _FetchFailed(Exception):
+    """どこからも取れなかった。"""
+
+
+def _fetch(key):
+    """model_helper.py に key のモデルをランタイムへ取ってきてもらう。ok か fallback を返す。"""
+    result = None
+    for event in _HelperCall({"op": "fetch", "key": key}).events(interrupted=_interrupted):
+        if event.get("event") == "notify":
+            _notify(event.get("data") or {})
+        elif event.get("event") == "end":
+            result = event
+    if result is None:
+        raise _FetchFailed("model_helper.py closed the connection")
+    if result.get("result") == "cancelled":
+        raise _Interrupted()
+    if result.get("result") in ("ok", "fallback"):
+        return result["result"]
+    raise _FetchFailed(result.get("message") or result.get("result") or "failed")
+
+
 def _install_model_hooks():
-    global LEDGER, FETCHER
+    global LEDGER
     if not RUNTIME_MODELS:
         return
     import folder_paths
-    sys.path.insert(0, str(STAGE))
     import model_sources
-    state = STAGE / "state"
-    LEDGER = model_sources.Ledger(os.environ.get("COMFY_COLAB_CLI_LEDGER", ""), state / "ledger.lock")
-    FETCHER = model_sources.Fetcher(
-        RUNTIME_MODELS, DRIVE_MODELS, LEDGER, os.environ.get("COMFY_COLAB_CLI_SOURCE", "drive"),
-        tokens_file=str(state / "tokens.json"), system_python=os.environ.get("COMFY_COLAB_CLI_SYSPY", ""),
-        state_dir=str(state), notify=_notify, interrupted=_interrupted)
+    LEDGER = model_sources.Ledger(os.environ.get("COMFY_COLAB_CLI_LEDGER", ""))
     original_full_path = folder_paths.get_full_path
     original_list = folder_paths.get_filename_list
 
@@ -321,22 +376,23 @@ def _install_model_hooks():
 
     def get_full_path(folder_name, filename):
         path = original_full_path(folder_name, filename)
-        if not _executing():
+        if not _executing() or not HELPER:
             return path
         try:
             if path is not None:
                 key = _inside(path, DRIVE_MODELS) if DRIVE_MODELS else None
-                if not key or not FETCHER.drive_ready():
+                if not key or not model_sources.valid_key(key):
                     return path
-                local = FETCHER.ensure_local(key, Path(path))
-                return str(local) if local else path
+                return str(Path(RUNTIME_MODELS) / key) if _fetch(key) == "ok" else path
             key = ledger_key(folder_name, filename)
             if key:
-                return str(FETCHER.ensure_local(key))
-        except model_sources.Stopped:
+                if _fetch(key) == "ok":
+                    return str(Path(RUNTIME_MODELS) / key)
+                raise _FetchFailed(key)
+        except _Interrupted:
             import comfy.model_management
             raise comfy.model_management.InterruptProcessingException()
-        except model_sources.Failure as failure:
+        except _FetchFailed as failure:
             if path is None:
                 raise FileNotFoundError(str(failure)) from None
         except Exception as error:  # 取れなくても、今までどおりの場所を返す
@@ -364,43 +420,17 @@ def _install_model_hooks():
     folder_paths.get_filename_list = get_filename_list
 
 
-def _backup_loop():
-    """ComfyUI-Manager などがランタイムに入れたモデルを、あとからドライブにも写す。
-    台帳にあるものと、このツールでランタイムだけと選ばれたものは写さない。"""
-    import model_sources
-    started = time.time()
-    seen = {}
-    runtime, drive = Path(RUNTIME_MODELS), Path(DRIVE_MODELS)
-    while True:
-        time.sleep(30)
-        try:
-            if not (drive.parent.is_dir() and runtime.is_dir()):
-                continue
-            known = (set(LEDGER.all()) if LEDGER else set()) | RUNTIME_ONLY
-            for key, path, size, mtime in model_sources.backup_candidates(runtime, drive, known, started):
-                # 書き終わったものだけを写す。続けて 2 回、同じ大きさと時刻だったら書き終わったとみなす
-                if seen.get(key) != (size, mtime) or time.time() - mtime < 60:
-                    seen[key] = (size, mtime)
-                    continue
-                if model_sources.copy_to_drive(path, drive / key, model_sources.Report(_notify, key)):
-                    print(f"[comfyui-colab-cli] copied to Google Drive: {key}", flush=True)
-                    _notify({"state": "backed_up", "name": key, "message": model_sources.t("backed_up", name=key)})
-                seen.pop(key, None)
-        except Exception as error:
-            print(f"[comfyui-colab-cli] Drive copy: {type(error).__name__}: {error}", flush=True)
-
-
 try:
     _install_model_hooks()
-    if FETCHER and DRIVE_MODELS:
-        threading.Thread(target=_backup_loop, name="colab-cli-drive-copy", daemon=True).start()
+    if HELPER:
+        threading.Thread(target=_subscribe_loop, name="colab-cli-notices", daemon=True).start()
 except Exception as error:
     print(f"[comfyui-colab-cli] model hooks are off: {type(error).__name__}: {error}", flush=True)
 
 
 @routes.get("/colab_cli/models/ledger")
 async def colab_cli_ledger(request):
-    """台帳の中身。raw=1 なら外した記録も含めてそのまま返す。手元の WSL へ写すときに使う。"""
+    """台帳の中身。raw=1 なら外した記録も含めてそのまま返す。"""
     if LEDGER is None:
         return _answer({"models": [], "available": False})
     models = await asyncio.get_running_loop().run_in_executor(None, LEDGER.all)
@@ -413,14 +443,26 @@ async def colab_cli_ledger(request):
 
 @routes.post("/colab_cli/models/ledger/remove")
 async def colab_cli_ledger_remove(request):
-    """台帳から外す。ファイルは消さない。"""
+    """台帳から外す。ファイルは消さない。台帳を書き換えるのは model_helper.py。"""
     body, refused = await _json_body(request)
     if refused:
         return refused
     key = body.get("key")
-    if LEDGER is None or not isinstance(key, str) or key not in LEDGER.entries():
+    if LEDGER is None or not HELPER or not isinstance(key, str) or key not in LEDGER.entries():
         return _answer({"error": "not in the ledger"}, 404)
-    await asyncio.get_running_loop().run_in_executor(None, LEDGER.remove, key)
+
+    def remove():
+        for event in _HelperCall({"op": "ledger-remove", "key": key}).events():
+            if event.get("event") == "end":
+                return event.get("result")
+        return None
+
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(None, remove)
+    except OSError:
+        return _answer({"error": "model helper unavailable"}, 503)
+    if result != "ok":
+        return _answer({"error": "not in the ledger"}, 404)
     return _answer({"removed": key})
 
 

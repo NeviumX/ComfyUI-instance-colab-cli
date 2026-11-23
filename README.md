@@ -36,6 +36,7 @@ Change the GPU, ports and other settings in `config.env`. Settings of your own c
 | Copy the outputs to this PC | | `./pull-outputs.sh` |
 | Show logs | | `./logs.sh` |
 | Open a shell on the VM | | `./ssh.sh` |
+| Open a shell as the user ComfyUI runs as | | `./ssh.sh app` |
 
 Double-clicking `start.bat` creates the runtime, downloads and starts ComfyUI, forwards the port and opens `http://localhost:8188` in your browser.
 
@@ -141,7 +142,7 @@ Choose the order with `MODEL_SOURCE` in `config.env`.
 - **`MODEL_SOURCE=drive`:** the default. Tries a parallel download with the Drive API, then a sequential copy from Drive, then the source in the ledger.
 - **`MODEL_SOURCE=url`:** tries the source in the ledger first, then Drive.
 
-While a model is being brought over, the progress is shown at the bottom right of ComfyUI. If nothing works, or the runtime disk is too full, the model is read from Drive directly as before.
+While a model is being brought over, the progress is shown at the bottom right of ComfyUI. If nothing works, or the runtime disk is too full, the model is read from Drive directly.
 If the ledger has a model with the same name but a different size from the one on Drive, the one on Drive is used.
 
 Models downloaded by ComfyUI-Manager and similar tools are saved on the runtime first and copied to Drive automatically once they are complete, so the next runtime can use them.
@@ -179,12 +180,25 @@ With the same `DRIVE_FOLDER`, an environment saved by either one can be restored
 - Some things are not part of the environment. Models stay in the models folder, outputs go to the local `outputs` folder, and the input and temp folders are not saved.
 - A malicious custom node in the saved environment runs again on the next runtime. If you suspect one, start with `RESTORE_ENVIRONMENT=0`.
 
+### The user ComfyUI runs as
+
+ComfyUI and custom nodes run on the Colab VM as `comfy`, a user that is not root.
+Custom nodes cannot touch files on Google Drive other than `DRIVE_FOLDER/models`, or tokens such as `HF_TOKEN`. `DRIVE_FOLDER/models` is read-only too.
+
+Custom nodes that need root do not work. To use `pip` and the like on the VM, open a shell with `./ssh.sh app` as the same user as ComfyUI.
+
+If something goes wrong, for example a custom node does not work, you can run ComfyUI as root:
+
+1. Put `ISOLATE_COMFY=0` in `config.local.env`.
+2. Delete the runtime with `stop.bat`.
+3. Start with `start.bat`.
+
 ## Notes
 
 - Closing the `start.bat` window does not stop the runtime, and it keeps being billed. When you are done, delete it with Stop in ComfyUI or with `stop.bat`.
 - Deleting the runtime erases every file on Colab. What remains is the models and the saved environment on Google Drive, and the outputs copied to this PC.
 - Do not save to the same `DRIVE_FOLDER` from two runtimes at once. If the notebook above uses the same folder, do not run both at the same time.
-- ComfyUI runs as root on the Colab VM and can read and write the whole mounted Google Drive. Install only custom nodes you trust, and consider a Google account that holds no personal data.
+- Custom nodes can read and write the files in the ComfyUI folder and can send data over the network. Install only ones you trust.
 - A Colab runtime accepts only one SSH connection at a time. To open a shell on the VM, use `./ssh.sh` instead of `colab ssh`.
 - Messages are shown in Japanese on a Japanese system and in English otherwise. Set `COMFY_COLAB_LANG` to `ja` or `en` in `config.env` to choose one.
 - To use a WSL distribution other than the default, set the environment variable `COMFY_COLAB_WSL_DISTRO` to its name before running the `.bat` files.

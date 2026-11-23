@@ -27,8 +27,10 @@ code=0
 [[ "$code" == 0 ]] || exit "$code"
 
 rmsg u_stopping
-tmux kill-session -t "$SAVE_SESSION" 2>/dev/null || true
-tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
+tmux kill-session -t "=$SAVE_SESSION" 2>/dev/null || true
+tmux kill-session -t "=$TMUX_SESSION" 2>/dev/null || true
+# ComfyUI を別の利用者で動かしているときは、その利用者のプロセスをすべて止める
+"$COMFY_PYTHON" "$STAGE_DIR/app_user.py" stop 9>&- || true
 for _ in $(seq 1 15); do
     pids=""
     for d in /proc/[0-9]*; do
@@ -41,4 +43,4 @@ for _ in $(seq 1 15); do
     sleep 1
 done
 
-"$COMFY_PYTHON" "$STAGE_DIR/comfy_env.py" update "$UPDATE_REF"
+"$COMFY_PYTHON" "$STAGE_DIR/comfy_env.py" update "$UPDATE_REF" 9>&-

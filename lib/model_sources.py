@@ -8,8 +8,13 @@
     MODEL_SOURCE=url:   台帳の元 URL → Drive API の並列ダウンロード → ドライブからの順番どおりのコピー
 どれも失敗したら、ドライブにあるモデルはドライブから直接読ませる。
 
-ノードからは同じプロセスで読み込み、手元の WSL からはコマンドとして使う。
-    python3 model_sources.py merge --into FILE --from FILE [--lock FILE]
+取得と台帳の書き換えとドライブへの写しは、Colab VM の root で動く model_helper.py が行う。
+ComfyUI を root ではない利用者で動かすとき、ドライブとトークンに触れるのは root だけだから。
+ランタイムの models はその利用者のものなので、root は AppTree を通して、リンクをたどらずに読み書きする。
+ComfyUI のノードは台帳の写しを読むだけ。
+
+手元の WSL からはコマンドとして使う。
+    python3 model_sources.py merge --into FILE --from FILE [--lock FILE] [--mirror FILE]
 """
 
 import argparse
@@ -22,6 +27,7 @@ from pathlib import Path, PurePosixPath
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -53,6 +59,7 @@ TEXTS = {
         "source_to_drive": "Google ドライブへコピー",
         "backup_failed": "Google ドライブにコピーできませんでした: {name}。{reason}",
         "drive_exists": "ドライブに同じ名前のファイルがあります。",
+        "unsafe_place": "モデルの場所にリンクか、フォルダーではないものがあります: {place}",
     },
     "en": {
         "source_url": "Downloading from the original URL",
@@ -71,6 +78,7 @@ TEXTS = {
         "source_to_drive": "Copying to Google Drive",
         "backup_failed": "Could not copy {name} to Google Drive. {reason}",
         "drive_exists": "A file with the same name is already on Drive.",
+        "unsafe_place": "The place of the model has a link or something that is not a folder: {place}",
     },
 }
 
@@ -114,16 +122,24 @@ def read_ledger(path):
     return {k: v for k, v in models.items() if valid_key(k) and isinstance(v, dict)}
 
 
-def write_ledger(path, models):
+def write_ledger(path, models, mode=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name("." + path.name + "." + secrets.token_hex(4) + ".tmp")
     try:
         temporary.write_text(json.dumps({"version": VERSION, "models": models}, ensure_ascii=False, indent=1,
                                         sort_keys=True), encoding="utf-8")
+        if mode is not None:
+            temporary.chmod(mode)
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def publish_mirror(source, mirror):
+    """台帳の写しを、ComfyUI の利用者が読める場所に置く。台帳そのものはドライブか root だけの場所にある。"""
+    if mirror:
+        write_ledger(mirror, read_ledger(source) if source else {}, mode=0o644)
 
 
 def merge_models(base, other):
@@ -149,9 +165,12 @@ def locked(lock_path):
 
 
 class Ledger:
-    def __init__(self, path, lock_path=None):
+    """台帳。mirror を渡すと、書き換えるたびに写しも書き直す。ノードは写しを path にして読むだけにする。"""
+
+    def __init__(self, path, lock_path=None, mirror=None):
         self.path = Path(path) if path else None
         self.lock_path = lock_path
+        self.mirror = Path(mirror) if mirror else None
         self._cache = (0.0, None, {})  # 読んだ時刻、更新時刻、内容
 
     def all(self):
@@ -181,7 +200,14 @@ class Ledger:
             models = read_ledger(self.path)
             update(models)
             write_ledger(self.path, models)
+            if self.mirror:
+                write_ledger(self.mirror, models, mode=0o644)
         self._cache = (0.0, None, {})
+
+    def publish(self):
+        if self.path and self.mirror:
+            with locked(self.lock_path):
+                publish_mirror(self.path, self.mirror)
 
     def record(self, key, url, page, sha256, size):
         def update(models):
@@ -194,6 +220,192 @@ class Ledger:
             entry.update(removed=True, updated=time.time())
             models[key] = entry
         self.change(update)
+
+
+def read_runtime_only(path):
+    """「ランタイムのみ」と選んでダウンロードしたモデル。Manager などのモデルと違い、ドライブへ写さない。"""
+    try:
+        keys = json.loads(Path(path).read_text())
+    except (OSError, ValueError, TypeError):
+        return set()
+    return {k for k in keys if valid_key(k)} if isinstance(keys, list) else set()
+
+
+def add_runtime_only(path, key, lock_path=None):
+    if not path:
+        return
+    with locked(lock_path):
+        keys = read_runtime_only(path) | {key}
+        temporary = Path(path).with_name("." + Path(path).name + ".tmp")
+        temporary.write_text(json.dumps(sorted(keys)))
+        os.replace(temporary, path)
+
+
+# ---- ランタイムの models ----
+
+class NewFile:
+    """AppTree.create が作った、書きかけのファイル。commit で正しい名前にする。"""
+
+    def __init__(self, dirfd, temporary, name, fd):
+        self.dirfd, self.temporary, self.name, self.fd = dirfd, temporary, name, fd
+
+    def commit(self):
+        """同じ名前があれば FileExistsError。置き換えはしない。"""
+        os.fsync(self.fd)
+        os.link(self.temporary, self.name, src_dir_fd=self.dirfd, dst_dir_fd=self.dirfd, follow_symlinks=False)
+        self.discard()
+
+    def discard(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        if self.dirfd is not None:
+            try:
+                os.unlink(self.temporary, dir_fd=self.dirfd)
+            except FileNotFoundError:
+                pass
+            os.close(self.dirfd)
+            self.dirfd = None
+
+
+class AppTree:
+    """ランタイムの models に、リンクをたどらずにファイルを作り、読む。
+    models は ComfyUI の利用者のもので、root から見ると、中のフォルダーをリンクに差し替えられているかもしれない。
+    フォルダーを 1 つずつ O_NOFOLLOW で開き、開いたフォルダーの中だけで操作する。owner は作ったものを渡す相手。"""
+
+    DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    def __init__(self, root, owner=None):
+        self.root = Path(root)
+        self.owner = owner
+
+    @staticmethod
+    def split(key):
+        if not valid_key(key):
+            raise Failure(t("unsafe_place", place=key))
+        parts = key.split("/")
+        return parts[:-1], parts[-1]
+
+    def folder(self, parts, create=False):
+        """parts のフォルダーを開いた記述子。無ければ create のときだけ作る。"""
+        try:
+            fd = os.open(self.root, self.DIRECTORY)
+        except OSError:
+            raise Failure(t("unsafe_place", place="/".join(parts) or ".")) from None
+        try:
+            for part in parts:
+                try:
+                    child = os.open(part, self.DIRECTORY, dir_fd=fd)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    try:
+                        os.mkdir(part, 0o755, dir_fd=fd)
+                        made = True
+                    except FileExistsError:
+                        made = False
+                    child = os.open(part, self.DIRECTORY, dir_fd=fd)
+                    if made and self.owner:
+                        os.fchown(child, *self.owner)
+                except OSError as error:
+                    if isinstance(error, FileNotFoundError):
+                        raise
+                    raise Failure(t("unsafe_place", place="/".join(parts))) from None
+                os.close(fd)
+                fd = child
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def stat(self, key):
+        """リンクをたどらない stat。無いか、たどれない場所なら None。"""
+        parts, name = self.split(key)
+        try:
+            fd = self.folder(parts)
+        except (OSError, Failure):
+            return None
+        try:
+            return os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
+
+    def is_file(self, key):
+        st = self.stat(key)
+        return bool(st and stat.S_ISREG(st.st_mode))
+
+    def exists(self, key):
+        return self.stat(key) is not None
+
+    def free(self, parts):
+        fd = self.folder(parts, create=True)
+        try:
+            info = os.fstatvfs(fd)
+            return info.f_bavail * info.f_frsize
+        finally:
+            os.close(fd)
+
+    def create(self, key):
+        parts, name = self.split(key)
+        dirfd = self.folder(parts, create=True)
+        temporary = ".comfy-" + secrets.token_hex(8) + ".part"
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=dirfd)
+            if self.owner:
+                os.fchown(fd, *self.owner)
+        except BaseException:
+            os.close(dirfd)
+            raise
+        return NewFile(dirfd, temporary, name, fd)
+
+    def open_read(self, key):
+        """通常のファイルだけを開いた記述子。リンクや FIFO なら Failure。"""
+        parts, name = self.split(key)
+        try:
+            dirfd = self.folder(parts)
+        except FileNotFoundError:
+            raise Failure(t("unsafe_place", place=key)) from None
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirfd)
+        except OSError:
+            raise Failure(t("unsafe_place", place=key)) from None
+        finally:
+            os.close(dirfd)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise Failure(t("unsafe_place", place=key))
+        return fd
+
+    def files(self):
+        """(キー, 大きさ, 更新時刻)。隠しファイルと書きかけとリンクは除く。"""
+        found = []
+        for parent, dirs, files, dirfd in os.fwalk(self.root, follow_symlinks=False):
+            relative = Path(parent).relative_to(self.root)
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            if relative.parts[:1] == ("configs",):
+                dirs[:] = []
+                continue
+            for name in files:
+                if name.startswith((".", "put_")) or name.endswith((".part", ".tmp")):
+                    continue
+                key = (relative / name).as_posix()
+                if not valid_key(key):
+                    continue
+                try:
+                    st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode):
+                    found.append((key, st.st_size, st.st_mtime))
+        return found
+
+
+def write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
 
 
 # ---- 進み具合 ----
@@ -234,46 +446,43 @@ class Stopped(Exception):
     """ComfyUI の中断で、取得をやめた。"""
 
 
-def parallel_fill(target, total, read_range, report, interrupted, workers):
-    """target に total バイトを、CHUNK ごとに分けて workers 本で同時に書く。read_range(start, end) はバイト列を順に返す。"""
+def parallel_fill(fd, total, read_range, report, interrupted, workers):
+    """開いたファイル fd に total バイトを、CHUNK ごとに分けて workers 本で同時に書く。
+    read_range(start, end) はバイト列を順に返す。"""
     from concurrent.futures import ThreadPoolExecutor, FIRST_EXCEPTION, wait
     stop = threading.Event()
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-    try:
-        if total:
-            os.ftruncate(fd, total)
+    if total:
+        os.ftruncate(fd, total)
 
-        def one(start):
-            end = min(start + CHUNK, total)
-            position = start
-            for block in read_range(start, end):
-                if stop.is_set():
-                    raise Stopped()
-                if position + len(block) > end:
-                    raise Failure(t("size_mismatch"))
-                os.pwrite(fd, block, position)
-                position += len(block)
-                report.advance(len(block))
-            if position != end:
+    def one(start):
+        end = min(start + CHUNK, total)
+        position = start
+        for block in read_range(start, end):
+            if stop.is_set():
+                raise Stopped()
+            if position + len(block) > end:
                 raise Failure(t("size_mismatch"))
+            os.pwrite(fd, block, position)
+            position += len(block)
+            report.advance(len(block))
+        if position != end:
+            raise Failure(t("size_mismatch"))
 
-        with ThreadPoolExecutor(workers) as pool:
-            pending = {pool.submit(one, start) for start in range(0, total, CHUNK)}
-            while pending:
-                finished, pending = wait(pending, timeout=0.5, return_when=FIRST_EXCEPTION)
-                for future in finished:
-                    if future.exception():
-                        stop.set()
-                        for other in pending:
-                            other.cancel()
-                        raise future.exception()
-                if interrupted():
+    with ThreadPoolExecutor(workers) as pool:
+        pending = {pool.submit(one, start) for start in range(0, total, CHUNK)}
+        while pending:
+            finished, pending = wait(pending, timeout=0.5, return_when=FIRST_EXCEPTION)
+            for future in finished:
+                if future.exception():
                     stop.set()
                     for other in pending:
                         other.cancel()
-                    raise Stopped()
-    finally:
-        os.close(fd)
+                    raise future.exception()
+            if interrupted():
+                stop.set()
+                for other in pending:
+                    other.cancel()
+                raise Stopped()
 
 
 class DriveApi:
@@ -404,11 +613,13 @@ class DriveApi:
 
 
 class Fetcher:
-    """ランタイムに写しが無いモデルを取ってくる。"""
+    """ランタイムに写しが無いモデルを取ってくる。root の model_helper.py が使う。
+    ランタイムの models には AppTree を通して書き、できたファイルは owner に渡す。"""
 
     def __init__(self, runtime_models, drive_models, ledger, mode="drive", tokens_file="", system_python="",
-                 state_dir="", notify=None, interrupted=None):
+                 state_dir="", notify=None, interrupted=None, owner=None):
         self.runtime = Path(runtime_models)
+        self.tree = AppTree(self.runtime, owner)
         self.drive = Path(drive_models) if drive_models else None
         self.ledger, self.mode, self.tokens_file = ledger, mode, tokens_file
         self.state = Path(state_dir) if state_dir else self.runtime
@@ -425,31 +636,39 @@ class Fetcher:
     def drive_ready(self):
         return bool(self.drive and self.drive.parent.is_dir())
 
+    def drive_file(self, key):
+        """ドライブにある key のモデル。無ければ None。"""
+        if not self.drive_ready() or not valid_key(key):
+            return None
+        path = self.drive / key
+        return path if path.is_file() else None
+
     def tokens(self):
         try:
             return json.loads(Path(self.tokens_file).read_text()) if self.tokens_file else {}
         except (OSError, ValueError):
             return {}
 
-    def ensure_local(self, key, drive_path=None):
+    def ensure_local(self, key, drive_path=None, notify=None, interrupted=None):
         """key のモデルをランタイムに用意してそのパスを返す。ドライブから直接読むべきなら None を返す。
         ドライブに無く、どこからも取れなければ Failure を投げる。"""
+        interrupted = interrupted or self.interrupted
         target = self.runtime / key
-        if target.is_file():
+        if self.tree.is_file(key):
             return target
         entry = self.ledger.entries().get(key) if self.ledger else None
-        report = Report(self.notify, key)
+        report = Report(notify or self.notify, key)
         drive_size = drive_path.stat().st_size if drive_path else 0
         size = drive_size or int((entry or {}).get("size") or 0)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        free = shutil.disk_usage(target.parent).free
+        parts, _ = AppTree.split(key)
+        free = self.tree.free(parts)
         if size and size + SPARE > free:
             reason = t("no_space", need=size_text(size), free=size_text(free))
             return self._give_up(report, key, reason, drive_path)
 
         lock_name = "fetch-" + hashlib.sha1(key.encode()).hexdigest()[:16] + ".lock"
         with locked(self.state / lock_name):
-            if target.is_file():  # 同じモデルを待っていた間に、ほかの呼び出しが取ってきた
+            if self.tree.is_file(key):  # 同じモデルを待っていた間に、ほかの呼び出しが取ってきた
                 return target
             # 台帳の URL は、ドライブにも同じ名前のモデルがあるときは、同じ大きさのときだけ使う
             url_ok = bool(entry and entry.get("url")) and (not drive_path or int(entry.get("size") or 0) == drive_size)
@@ -458,10 +677,14 @@ class Fetcher:
             sources = url_sources + drive_sources if self.mode == "url" else drive_sources + url_sources
             reason = t("no_source")
             for source in sources:
-                partial = target.with_name(".comfy-" + secrets.token_hex(8) + ".part")
+                new = self.tree.create(key)
                 try:
-                    getattr(self, "_from_" + source)(key, entry, drive_path, partial, report)
-                    os.replace(partial, target)
+                    getattr(self, "_from_" + source)(key, entry, drive_path, new.fd, report, interrupted)
+                    try:
+                        new.commit()
+                    except FileExistsError:
+                        if not self.tree.is_file(key):
+                            raise Failure(t("unsafe_place", place=key)) from None
                     report.send("done", "", force=True)
                     return target
                 except Stopped:
@@ -471,7 +694,7 @@ class Fetcher:
                     reason = str(error) or type(error).__name__
                     print(f"[comfyui-colab-cli] {key}: {source}: {reason}", flush=True)
                 finally:
-                    partial.unlink(missing_ok=True)
+                    new.discard()
             return self._give_up(report, key, reason, drive_path)
 
     def _give_up(self, report, key, reason, drive_path):
@@ -482,7 +705,7 @@ class Fetcher:
         report.send("failed", message, force=True)
         raise Failure(message)
 
-    def _from_url(self, key, entry, drive_path, partial, report):
+    def _from_url(self, key, entry, drive_path, fd, report, interrupted):
         import model_download  # 同じフォルダーにある。転送のたどり方と、内部のアドレスを断る仕組みを使う
         url = entry["url"]
         host = (urlsplit(url).hostname or "").removeprefix("www.")
@@ -490,28 +713,30 @@ class Fetcher:
         response = model_download.open_download(url, self.tokens().get(token_name, ""))
         expected = int(entry.get("size") or 0)
         digest = hashlib.sha256()
-        with response, partial.open("wb") as file:
+        written = 0
+        with response:
             length = response.headers.get("Content-Length", "")
             report.start("url", int(length) if length.isdigit() else expected)
             for block in iter(lambda: response.read(4 * 1024 * 1024), b""):
-                if self.interrupted():
+                if interrupted():
                     raise Stopped()
-                file.write(block)
+                write_all(fd, block)
+                written += len(block)
                 digest.update(block)
                 report.advance(len(block))
-        if expected and partial.stat().st_size != expected:
+        if expected and written != expected:
             raise Failure(t("size_mismatch"))
         if entry.get("sha256") and digest.hexdigest() != entry["sha256"]:
             raise Failure(t("hash_mismatch"))
 
-    def _from_drive_api(self, key, entry, drive_path, partial, report):
+    def _from_drive_api(self, key, entry, drive_path, fd, report, interrupted):
         file_id, size = self.api.lookup(drive_path)
         if size != drive_path.stat().st_size:
             raise Failure(t("size_mismatch"))
         report.start("drive_api", size)
-        parallel_fill(partial, size, self.api.read_range(file_id, self.interrupted), report, self.interrupted, WORKERS)
+        parallel_fill(fd, size, self.api.read_range(file_id, interrupted), report, interrupted, WORKERS)
 
-    def _from_drive_copy(self, key, entry, drive_path, partial, report):
+    def _from_drive_copy(self, key, entry, drive_path, fd, report, interrupted):
         size = drive_path.stat().st_size
         report.start("drive_copy", size)
         source = os.open(drive_path, os.O_RDONLY)
@@ -524,48 +749,46 @@ class Fetcher:
                         return
                     position += len(block)
                     yield block
-            parallel_fill(partial, size, read, report, self.interrupted, 4)
+            parallel_fill(fd, size, read, report, interrupted, 4)
         finally:
             os.close(source)
 
 
 # ---- ドライブへの写し ----
 
-def backup_candidates(runtime, drive, known, since):
-    """ランタイムにだけある、ComfyUI の起動後に増えたモデル。台帳にあるものと書きかけは除く。"""
+def backup_candidates(tree, drive, known, since):
+    """ランタイムにだけある、起動の後に増えたモデル。台帳にあるもの、ランタイムのみのもの、書きかけは除く。"""
     found = []
-    for parent, dirs, files in os.walk(runtime):
-        dirs[:] = [d for d in dirs if not d.startswith(".") and not (Path(parent) / d).is_symlink()]
-        relative_parent = Path(parent).relative_to(runtime)
-        if relative_parent.parts[:1] == ("configs",):
+    for key, size, mtime in tree.files():
+        if key in known or mtime < since:
             continue
-        for name in files:
-            path = Path(parent) / name
-            if name.startswith((".", "put_")) or name.endswith((".part", ".tmp")) or path.is_symlink():
-                continue
-            key = (relative_parent / name).as_posix()
-            if not valid_key(key) or key in known:
-                continue
-            try:
-                st = path.stat()
-            except OSError:
-                continue
-            if st.st_mtime < since or (drive / key).exists():
-                continue
-            found.append((key, path, st.st_size, st.st_mtime))
+        if (drive / key).exists():
+            continue
+        found.append((key, size, mtime))
     return found
 
 
-def copy_to_drive(path, target, report=None):
-    """ランタイムのモデルをドライブに写す。report があれば、進み具合を右下の通知に送る。"""
+def copy_to_drive(tree, key, target, report=None, limit=None):
+    """ランタイムのモデルをドライブに写す。ランタイムのファイルはリンクをたどらずに開き、
+    limit より多くは読まない。report があれば、進み具合を右下の通知に送る。同じ名前が既にあれば False。"""
+    target = Path(target)
+    if target.exists():
+        return False
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(".comfy-" + secrets.token_hex(8) + ".part")
+    source = tree.open_read(key)
     try:
+        size = os.fstat(source).st_size if limit is None else min(limit, os.fstat(source).st_size)
         if report:
-            report.start("to_drive", path.stat().st_size)
-        with path.open("rb") as source, temporary.open("wb") as sink:
-            for chunk in iter(lambda: source.read(16 * 1024 * 1024), b""):
+            report.start("to_drive", size)
+        with temporary.open("wb") as sink:
+            left = size
+            while left > 0:
+                chunk = os.read(source, min(16 * 1024 * 1024, left))
+                if not chunk:
+                    break
                 sink.write(chunk)
+                left -= len(chunk)
                 if report:
                     report.advance(len(chunk))
         if target.exists():
@@ -573,6 +796,7 @@ def copy_to_drive(path, target, report=None):
         os.replace(temporary, target)
         return True
     finally:
+        os.close(source)
         temporary.unlink(missing_ok=True)
 
 
@@ -582,14 +806,18 @@ def main():
     parser.add_argument("--into", required=True)
     parser.add_argument("--from", dest="source", required=True)
     parser.add_argument("--lock", default="")
+    parser.add_argument("--mirror", default="")
     args = parser.parse_args()
     if not Path(args.source).is_file():
+        with locked(args.lock):
+            publish_mirror(args.into if Path(args.into).is_file() else "", args.mirror)
         return 0
     other = read_ledger(args.source)
     with locked(args.lock):
         merged = merge_models(read_ledger(args.into), other)
         if merged != read_ledger(args.into) or not Path(args.into).exists():
             write_ledger(args.into, merged)
+        publish_mirror(args.into, args.mirror)
     return 0
 
 
