@@ -139,6 +139,16 @@ def parse_model_url(url):
     raise Failure(t("unsupported_url"))
 
 
+def page_url(url):
+    """台帳にダウンロード元として残す URL。貼り付けた URL のうち、ページを示す部分だけを残す。
+    台帳の写しは ComfyUI の利用者も読めるので、Civitai の ?token= のようなクエリや、URL に書いた利用者名とパスワードは残さない。
+    Civitai のモデルのページはバージョンを modelVersionId で示すので、クエリはそれだけを残す。"""
+    parsed = urlsplit(url.strip())
+    version = parse_qs(parsed.query).get("modelVersionId", [""])[0]
+    query = "modelVersionId=" + version if re.fullmatch(r"[1-9][0-9]*", version) else ""
+    return parsed._replace(netloc=parsed.netloc.rpartition("@")[2], query=query, fragment="").geturl()
+
+
 def checked_https(url):
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in {None, 443}:
@@ -413,7 +423,7 @@ def download(args, tokens, progress):
     state = Path(args.state or args.models)
     if args.ledger:
         model_sources.Ledger(args.ledger, state / "ledger.lock", args.ledger_mirror or None).record(
-            relative, pinned_url(url, seen.get("commit", "")), args.url.strip(), digest.hexdigest(), written)
+            relative, pinned_url(url, seen.get("commit", "")), page_url(args.url), digest.hexdigest(), written)
     elif args.runtime_only_file:
         # 台帳に記録しないモデルは、Manager などのモデルと区別して、ドライブへ自動で写さない
         model_sources.add_runtime_only(args.runtime_only_file, relative, state / "runtime-only.lock")

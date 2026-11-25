@@ -504,6 +504,9 @@ EXTRA_PATHS="$STAGE_DIR/extra_model_paths.yaml"
             [[ -d "$d" ]] || continue
             n="$(basename "$d")"
             [[ "$n" =~ ^[A-Za-z0-9][A-Za-z0-9._\ -]*$ ]] || continue
+            # custom_nodes に登録した場所からは ComfyUI がノードのコードを読み込み、base_path と is_default は設定として読まれる。
+            # どれもモデルの種類ではないので、ドライブに同じ名前のフォルダーがあっても書かない
+            case "$n" in custom_nodes|base_path|is_default) continue ;; esac
             echo "  \"$n\": \"$n\""
         done
     fi

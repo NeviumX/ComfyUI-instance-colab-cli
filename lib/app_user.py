@@ -25,6 +25,7 @@ import time
 
 APP_USER = "comfy"
 SETPRIV = "/usr/bin/setpriv"
+ENV = "/usr/bin/env"
 APP_TIMEOUT = 2 * 3600
 OUTPUT_LIMIT = 16 * 1024 ** 2
 
@@ -88,6 +89,17 @@ def app_cwd(cwd):
     return str(base())
 
 
+def launch(args, cwd=None):
+    """その利用者として args を実行する命令と、root がそれを始める前に移るフォルダー。
+    分けているときは root は移らず、その利用者になってから env が今いるフォルダーへ移る。root が移ると、
+    その利用者が作業場所に置いたリンクを root としてたどり、PRIVATE_DIR の中のドライブのような、
+    その利用者が自分では入れない場所を今いるフォルダーとして渡してしまうため。"""
+    cwd = app_cwd(cwd)
+    if not isolated():
+        return app_command(args), cwd
+    return app_command([ENV, "--chdir", cwd, "--", *args]), None
+
+
 def app_env(extra=None):
     if isolated():
         return application_environment(extra)
@@ -98,7 +110,8 @@ def app_env(extra=None):
 
 def run(args, *, cwd=None, extra=None, timeout=APP_TIMEOUT, stdin=None):
     """その利用者として実行し、出力はそのまま流す。失敗したら CalledProcessError。"""
-    subprocess.run(app_command(args), env=app_env(extra), cwd=app_cwd(cwd), check=True, timeout=timeout, stdin=stdin)
+    command, cwd = launch(args, cwd)
+    subprocess.run(command, env=app_env(extra), cwd=cwd, check=True, timeout=timeout, stdin=stdin)
 
 
 def bounded(command, *, env, limit, timeout, stdin=None, sink=None, cwd=None):
@@ -154,8 +167,9 @@ def bounded(command, *, env, limit, timeout, stdin=None, sink=None, cwd=None):
 
 def capture(args, *, cwd=None, extra=None, limit=OUTPUT_LIMIT, timeout=APP_TIMEOUT, stdin=None, sink=None):
     """その利用者として実行し、出力を受け取る。失敗したら RuntimeError。"""
-    code, out, err = bounded(app_command(args), env=app_env(extra), limit=limit, timeout=timeout,
-                             stdin=stdin, sink=sink, cwd=app_cwd(cwd))
+    command, cwd = launch(args, cwd)
+    code, out, err = bounded(command, env=app_env(extra), limit=limit, timeout=timeout,
+                             stdin=stdin, sink=sink, cwd=cwd)
     if code:
         detail = err.decode(errors="replace").strip().splitlines()[-3:]
         raise RuntimeError(f"{Path(str(args[0])).name} exited with {code}: " + " / ".join(detail))
@@ -280,10 +294,9 @@ def main(argv):
         if not args:
             print(__doc__, file=sys.stderr)
             return 2
-        cwd = app_cwd(cwd)
+        command_line, cwd = launch(args, cwd)
         if cwd:
             os.chdir(cwd)
-        command_line = app_command(args)
         os.execvpe(command_line[0], command_line, app_env(extra))
     if command == "ensure-user":
         if isolated():

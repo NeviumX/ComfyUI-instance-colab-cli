@@ -63,6 +63,17 @@ log()  { printf '\033[36m[%s]\033[0m %s\n' "$(date +%H:%M:%S)" "$*"; }
 warn() { printf '\033[33m[%s] %s\033[0m\n' "$(date +%H:%M:%S)" "$*" >&2; }
 die()  { printf '\033[31m[%s] %s\033[0m\n' "$(date +%H:%M:%S)" "$*" >&2; exit 1; }
 
+# Colab VM から届いた文字を、端末を操作する制御文字と制御の並びを取り除いてから出す。色の指定と行頭復帰は残す。
+# VM のログや出力には ComfyUI やカスタムノードが書いた文字が混じるため、手元の端末に出す前に通す。
+# 手元に python3 が無いときは、起動などが止まらないよう、これまでどおりそのまま出す
+strip_controls() {
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "$ROOT/lib/strip_controls.py"
+    else
+        cat
+    fi
+}
+
 require_cmds() {
     local c
     for c in "$@"; do
@@ -176,13 +187,14 @@ remote_start() {
     # shellcheck disable=SC2034  # remote_env で Colab VM に渡す
     local FORCE_RESTART="${1:-0}"
     upload_files
-    # 表示する文章も一緒に送り、言語は手元で決めたものを使わせる
+    # 表示する文章も一緒に送り、言語は手元で決めたものを使わせる。
+    # 準備の出力には ComfyUI の利用者が動かした命令の出力も混じるので、標準エラーもまとめて strip_controls を通す
     cat "$ROOT/lib/messages.sh" "$ROOT/lib/remote-setup.sh" |
         rssh "$(remote_env COMFY_REPO COMFY_REF COMFY_BASE REMOTE_PORT INSTALL_MANAGER CUSTOM_NODES COMFY_EXTRA_ARGS \
                 APT_PACKAGES REMOTE_LOG FORCE_RESTART MSG_LANG DRIVE_READY DRIVE_MODELS DRIVE_STORAGE DRIVE_LEDGER MODEL_SOURCE \
                 SAVE_ENVIRONMENT RESTORE_ENVIRONMENT SAVE_INTERVAL_SEC AUTO_UPDATE USE_SAGE_ATTENTION PULL_OUTPUTS_ON_STOP \
                 STAGE_DIR TMUX_SESSION SAVE_SESSION HELPER_SESSION NODE_NAME \
-                ISOLATE_COMFY PRIVATE_DIR DRIVE_VIEW COMFY_APP_UV_CACHE) bash -s"
+                ISOLATE_COMFY PRIVATE_DIR DRIVE_VIEW COMFY_APP_UV_CACHE) bash -s" 2>&1 | strip_controls
 }
 
 # 停止ボタンのカスタムノード、環境を保存・復元・更新する comfy_env.py、モデルをダウンロードする model_download.py、
@@ -347,7 +359,8 @@ wait_healthy() {
                 remote_start 1
                 deadline=$((SECONDS + HEALTH_TIMEOUT_MIN * 60))
                 ;;
-            *) if [[ -n "${status//[[:space:]]/}" ]]; then printf '    %s\n' "${status:0:160}"; fi ;;
+            # ログの最終行は ComfyUI やカスタムノードが書いたものなので、制御文字を取り除いてから出す
+            *) if [[ -n "${status//[[:space:]]/}" ]]; then printf '    %s\n' "${status:0:160}" | strip_controls; fi ;;
         esac
         (( SECONDS < deadline )) || die "$(msg start_timeout "$HEALTH_TIMEOUT_MIN")"
         sleep "$POLL_SEC"
